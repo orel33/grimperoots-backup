@@ -1,0 +1,6 @@
+services:
+  web:
+    image: grimperoots-backup-php83
+    build:
+      context: .
+      dockerfile: Dockerfile

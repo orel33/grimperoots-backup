@@ -1,0 +1,7 @@
+.env
+.env.local
+*.env
+/bak/
+/snapshots-j6/
+/__pycache__/
+*.py[cod]
