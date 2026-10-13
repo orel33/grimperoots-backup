@@ -52,14 +52,14 @@ class Workflows(unittest.TestCase):
 
     def test_local_backup_identifier_selects_correct_archive(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(manage_j6, 'BACKUP', Path(temp)):
-            for identifier, stamp in (('one', '20261010-112009'), ('two', '20261010-175542')):
-                path = Path(temp) / identifier
+            for stamp in ('20261010-112009', '20261010-175542'):
+                path = Path(temp) / stamp
                 path.mkdir()
                 (path / 'archive.jpa').write_bytes(b'a')
                 (path / 'manifest.json').write_text(json.dumps({
                     'archive': 'grimperoots-j6-' + stamp + '.jpa',
                     'files': [{'name': 'archive.jpa', 'size': 1}]}))
-            self.assertEqual(manage_j6.select_backup('20261010-175542'), Path(temp) / 'two')
+            self.assertEqual(manage_j6.select_backup('20261010-175542'), Path(temp) / '20261010-175542')
             with self.assertRaisesRegex(ValueError, 'ambigu'):
                 manage_j6.select_backup('20261010')
 
@@ -150,7 +150,8 @@ class Workflows(unittest.TestCase):
             self.assertIn(str(restore_archive.ROOT / 'j6/docker/apache.conf'), compose)
             self.assertIn(str(restore_archive.ROOT / 'j6/docker/proxy.conf'), compose)
             self.assertIn(str(restore_archive.KICKSTART), compose)
-            self.assertEqual(runtime, run_dir / 'runtime')
+            self.assertIn(str(run_dir / 'www') + ':/var/www/html', compose)
+            self.assertEqual(runtime, run_dir / 'www')
 
     def test_list_prints_actionable_remote_identifier(self):
         args = type('Args', (), {'local_only': False})()
@@ -186,8 +187,8 @@ class Workflows(unittest.TestCase):
             backup_ids.resolve('20261010', [{'archive': name} for name in names], 'archive')
 
     def test_run_commands_resolve_same_backup_identifier(self):
-        with tempfile.TemporaryDirectory() as temp, mock.patch.object(manage_j6, 'RUNS', Path(temp)):
-            path = Path(temp) / 'grimperoots-j6-20261010-112009-abcd'
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(manage_j6, 'RUNTIME', Path(temp)):
+            path = Path(temp) / '20261010-112009'
             path.mkdir()
             (path / 'compose.yaml').write_text('services: {}\n')
             (path / '.env').write_text('DB_PASSWORD=x\n')
@@ -202,7 +203,7 @@ class Workflows(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             backup = Path(temp) / 'backup'
             backup.mkdir()
-            run_dir = Path(temp) / 'run'
+            run_dir = Path(temp) / '20261010-112009'
             run_dir.mkdir()
             row = {'archive': 'grimperoots-j6-20261010-112009.jpa', 'path': run_dir,
                    'metadata': {'archive_dir': str(backup), 'stage': 'verifying'}}
@@ -210,7 +211,7 @@ class Workflows(unittest.TestCase):
                  mock.patch.object(manage_j6, 'run_inventory', return_value=[row]), \
                  mock.patch.object(manage_j6.subprocess, 'run') as run:
                 manage_j6.run_command(args)
-            self.assertEqual(run.call_args.args[0][-2:], ['--resume-run', str(run_dir)])
+            self.assertEqual(run.call_args.args[0][-2:], ['--resume', run_dir.name])
 
     def test_restore_identifier_reuses_complete_run(self):
         args = type('Args', (), {'action': 'restore', 'identifier': '20261010'})()
@@ -227,6 +228,29 @@ class Workflows(unittest.TestCase):
                 manage_j6.run_command(args)
             run.assert_not_called()
             self.assertIn('http://localhost:18081/j6/', output.getvalue())
+
+    def test_instance_commands_require_valid_ids(self):
+        for command in ('start', 'stop', 'restart', 'verify', 'clean', 'cleanall'):
+            with self.subTest(command=command), \
+                 mock.patch.object(sys, 'argv', ['j6.sh', command]), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    manage_j6.main()
+                self.assertEqual(error.exception.code, 2)
+        with mock.patch.object(sys, 'argv', ['j6.sh', 'start', '20261340']), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                manage_j6.main()
+            self.assertEqual(error.exception.code, 2)
+
+    def test_j6_help_shows_usage_and_examples(self):
+        with mock.patch.object(sys, 'argv', ['j6.sh', '--help']), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as error:
+                manage_j6.main()
+        self.assertEqual(error.exception.code, 0)
+        self.assertIn('usage: ./j6.sh', output.getvalue())
+        self.assertIn('./j6.sh cleanall 20261010', output.getvalue())
 
 
 if __name__ == '__main__':

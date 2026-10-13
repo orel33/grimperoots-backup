@@ -2,6 +2,7 @@
 """Commande principale des sauvegardes et copies locales Joomla 6."""
 
 import argparse
+import datetime as dt
 import ftplib
 import json
 from pathlib import Path
@@ -14,39 +15,54 @@ import sys
 from backup_ids import IDENTIFIER, display_ids, long_id, resolve
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNS = ROOT / 'j6/runs'
-BACKUP = ROOT / 'j6/backup/akeeba'
+RUNTIME = ROOT / 'runtime'
+BACKUP = ROOT / 'backup'
 SCRIPTS = ROOT / 'scripts'
 
 
+def identifier_arg(value):
+    if not IDENTIFIER.fullmatch(value):
+        raise argparse.ArgumentTypeError('format attendu : AAAAMMJJ ou AAAAMMJJ-HHMMSS')
+    pattern = '%Y%m%d-%H%M%S' if '-' in value else '%Y%m%d'
+    try:
+        dt.datetime.strptime(value, pattern)
+    except ValueError:
+        raise argparse.ArgumentTypeError('date/heure invalide dans l’identifiant') from None
+    return value
+
+
 def known_runs():
-    if not RUNS.is_dir():
+    if not RUNTIME.is_dir():
         return []
-    return sorted(path for path in RUNS.iterdir()
-                  if path.is_dir() and not path.is_symlink() and (path / 'run.json').is_file())
+    known = []
+    for path in RUNTIME.iterdir():
+        if not path.is_dir() or path.is_symlink() or not (path / 'run.json').is_file():
+            continue
+        try:
+            metadata = json.loads((path / 'run.json').read_text())
+            if long_id(metadata.get('archive', '')) == path.name:
+                known.append(path)
+        except (OSError, ValueError, TypeError):
+            continue
+    return sorted(known)
 
 
-def select_run(name):
-    if name is None:
-        runs = known_runs()
-        if len(runs) != 1:
-            raise ValueError('Préciser le nom du run (./j6.sh status affiche les runs disponibles).')
-        path = runs[0]
-    else:
-        if IDENTIFIER.fullmatch(name):
-            row = resolve(name, run_inventory(), 'run local')
-            path = row['path']
-        else:
-            if Path(name).name != name or name in ('.', '..'):
-                raise ValueError('Le run doit être un identifiant affiché par ./j6.sh list.')
-            path = RUNS / name
-        if path.is_symlink() or not path.is_dir() or not (path / 'run.json').is_file():
-            raise ValueError('Run introuvable : ' + name)
+def select_run(identifier):
+    if not identifier or not IDENTIFIER.fullmatch(identifier):
+        raise ValueError('Un ID AAAAMMJJ ou AAAAMMJJ-HHMMSS affiché par list est obligatoire.')
+    row = resolve(identifier, run_inventory(), 'instance locale')
+    if row is None:
+        raise ValueError('Utiliser un identifiant AAAAMMJJ ou AAAAMMJJ-HHMMSS affiché par list.')
+    path = row['path']
+    if path.is_symlink() or not path.is_dir() or not (path / 'run.json').is_file():
+        raise ValueError('Instance introuvable pour l’identifiant : ' + identifier)
     metadata = json.loads((path / 'run.json').read_text())
-    if metadata.get('project') != 'grimperoots-snapshot-' + path.name.lower().replace('_', '-'):
-        raise ValueError('Métadonnées de run inattendues : ' + path.name)
+    if long_id(metadata.get('archive', '')) != path.name:
+        raise ValueError('L’identifiant du dossier ne correspond pas à son archive : ' + path.name)
+    if not re.fullmatch(r'grimperoots-snapshot-[a-z0-9_-]+', metadata.get('project', '')):
+        raise ValueError('Métadonnées inattendues pour l’instance : ' + path.name)
     if not (path / 'compose.yaml').is_file() or not (path / '.env').is_file():
-        raise ValueError('Compose ou .env absent pour le run : ' + path.name)
+        raise ValueError('Compose ou .env absent pour l’instance : ' + path.name)
     return path, metadata
 
 
@@ -122,12 +138,14 @@ def local_inventory():
     if not BACKUP.is_dir():
         return rows
     for path in sorted(BACKUP.iterdir(), reverse=True):
-        if not path.is_dir():
+        if path.is_symlink() or not path.is_dir():
             continue
         try:
             manifest_file = path / 'manifest.json'
             if manifest_file.is_file():
                 manifest = json.loads(manifest_file.read_text())
+                if long_id(manifest.get('archive', '')) != path.name:
+                    continue
                 parts = manifest['files']
                 complete = bool(parts) and all((path / part['name']).is_file() and
                                                (path / part['name']).stat().st_size == part['size']
@@ -152,6 +170,8 @@ def local_inventory():
                         received += min(partial.stat().st_size, part['size'])
                 archive = next((part['name'] for part in parts
                                 if re.search(r'\.(?:jpa|jps|zip)$', part['name'], re.IGNORECASE)), parts[0]['name'])
+                if long_id(archive) != path.name:
+                    continue
                 rows.append({'archive': archive, 'path': path,
                              'directory': parts[0]['remote'].rsplit('/', 1)[0],
                              'size': total, 'status': f'incomplet {received / total:.1%}',
@@ -237,28 +257,28 @@ def run_command(args):
         matching = [row for row in run_inventory()
                     if Path(row['metadata'].get('archive_dir', '')).resolve() == backup.resolve()]
         if len(matching) > 1:
-            raise ValueError('Plusieurs runs correspondent à cette archive ; examiner ./j6.sh list.')
+            raise ValueError('Plusieurs instances correspondent à cette archive ; examiner ./j6.sh list.')
         if matching:
             row = matching[0]
             if row['metadata'].get('stage') == 'complete':
                 print('Archive déjà restaurée : ' + row['metadata'].get('url', str(row['path'])))
                 return
-            command += ['--resume-run', str(row['path'])]
+            command += ['--resume', row['path'].name]
         else:
             command.append(str(backup))
         subprocess.run(command, check=True)
-    elif args.action == 'status' and args.run is None:
+    elif args.action == 'status' and args.identifier is None:
         runs = run_inventory()
         if not runs:
-            print('Aucune restauration locale sous j6/runs/.')
+            print('Aucune restauration locale sous runtime/.')
         displayed = display_ids(row['archive'] for row in runs)
         for row in runs:
-            path, metadata = select_run(row['path'].name)
+            path, metadata = select_run(long_id(row['archive']))
             print(f"{displayed.get(long_id(row['archive']), '?')}\t"
                   f"{metadata.get('stage', '?')}\t{metadata.get('url', '')}")
             compose(path, metadata, 'ps')
     elif args.action in ('start', 'stop', 'restart', 'status'):
-        run_dir, metadata = select_run(args.run)
+        run_dir, metadata = select_run(args.identifier)
         if args.action == 'restart':
             compose(run_dir, metadata, 'stop')
             compose(run_dir, metadata, 'up', '-d', '--wait')
@@ -266,16 +286,16 @@ def run_command(args):
             compose(run_dir, metadata, *{'start': ('up', '-d', '--wait'),
                                          'stop': ('stop',), 'status': ('ps',)}[args.action])
     elif args.action == 'verify':
-        run_dir, metadata = select_run(args.run)
+        run_dir, metadata = select_run(args.identifier)
         compose(run_dir, metadata, 'up', '-d', '--wait')
         from verify_restore import verify_run
         verify_run(run_dir, int(metadata['port']))
     elif args.action == 'clean':
-        if not args.run:
+        if not args.identifier:
             raise ValueError('Un identifiant est obligatoire pour clean.')
-        run_dir, metadata = select_run(args.run)
-        print(f'Suppression de {run_dir} et de son volume MySQL ; archives conservées.')
-        confirm('CLEAN ' + (args.run or long_id(metadata['archive']) or run_dir.name))
+        run_dir, metadata = select_run(args.identifier)
+        print(f'Suppression de l’instance {run_dir} et de son volume MySQL ; archives conservées.')
+        confirm('CLEAN ' + args.identifier)
         compose(run_dir, metadata, 'down', '--volumes', '--remove-orphans')
         shutil.rmtree(run_dir)
     elif args.action == 'cleanall':
@@ -287,12 +307,12 @@ def run_command(args):
         archive = selected['archive']
         local_paths = [row['path'] for row in backups if row['archive'] == archive]
         run_rows = [row for row in runs if row['archive'] == archive]
-        if any(path.is_symlink() or path.resolve().parent != RUNS.resolve() for path in
+        if any(path.is_symlink() or path.resolve().parent != RUNTIME.resolve() for path in
                (row['path'] for row in run_rows)):
-            raise ValueError('Run hors du dossier attendu ; cleanall annulé.')
+            raise ValueError('Instance hors du dossier attendu ; cleanall annulé.')
         if any(path.is_symlink() or path.resolve().parent != BACKUP.resolve() for path in local_paths):
             raise ValueError('Archive locale hors du dossier attendu ; cleanall annulé.')
-        print(f'Suppression de {len(run_rows)} run(s), de leurs volumes MySQL et de '
+        print(f'Suppression de {len(run_rows)} instance(s), de leurs volumes MySQL et de '
               f'{len(local_paths)} téléchargement(s) local(aux) pour {archive}.')
         confirm('CLEANALL ' + args.identifier)
         for row in run_rows:
@@ -310,7 +330,7 @@ def run_command(args):
             resolve(args.identifier, local + runs, 'backup local', allow_same_name=True)
             paths = [row['path'] for row in local + runs]
         else:
-            paths = (BACKUP, RUNS)
+            paths = (BACKUP, RUNTIME)
         for path in paths:
             print(f'{format_size(disk_size(path))}\t{path}')
         print('Volumes et images Docker exclus.')
@@ -319,22 +339,40 @@ def run_command(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog='./j6.sh', description=__doc__)
-    sub = parser.add_subparsers(dest='action', required=True)
-    download = sub.add_parser('download', help='télécharger une archive FTP, ou la dernière en production')
-    download.add_argument('identifier', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    restore = sub.add_parser('restore', help='restaurer la dernière archive locale dans un nouveau run')
-    restore.add_argument('identifier', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    for action in ('start', 'status', 'stop', 'restart', 'verify'):
-        item = sub.add_parser(action)
-        item.add_argument('run', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    clean = sub.add_parser('clean', help='supprimer une copie restaurée en conservant son archive locale')
-    clean.add_argument('run', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    cleanall = sub.add_parser('cleanall', help='supprimer un backup local, ses runs et volumes')
-    cleanall.add_argument('identifier', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    usage = sub.add_parser('diskusage', help='afficher la taille des archives et runs')
-    usage.add_argument('identifier', nargs='?', help='limiter à ce backup local')
-    inventory = sub.add_parser('list', help='inventaire FTP, archives locales et restaurations')
+    parser = argparse.ArgumentParser(
+        prog='./j6.sh',
+        description='Télécharger, restaurer et gérer les sauvegardes Joomla 6.',
+        epilog='''Exemples :
+  ./j6.sh list
+  ./j6.sh download 20261010
+  ./j6.sh restore 20261010
+  ./j6.sh status 20261010
+  ./j6.sh start 20261010
+  ./j6.sh verify 20261010
+  ./j6.sh cleanall 20261010''',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='action', required=True, metavar='commande')
+    download = sub.add_parser('download', help='télécharger la dernière archive ou celle désignée par ID')
+    download.add_argument('identifier', nargs='?', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    restore = sub.add_parser('restore', help='restaurer la dernière archive locale ou celle désignée par ID')
+    restore.add_argument('identifier', nargs='?', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    start = sub.add_parser('start', help='démarrer les conteneurs de ID')
+    start.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    status = sub.add_parser('status', help='afficher toutes les instances, ou celle désignée par ID')
+    status.add_argument('identifier', nargs='?', type=identifier_arg, help='limiter l’état à cette instance')
+    stop = sub.add_parser('stop', help='arrêter les conteneurs de ID')
+    stop.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    restart = sub.add_parser('restart', help='redémarrer les conteneurs de ID')
+    restart.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    verify = sub.add_parser('verify', help='vérifier le site restauré pour ID')
+    verify.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    clean = sub.add_parser('clean', help='supprimer une instance en conservant son archive locale')
+    clean.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    cleanall = sub.add_parser('cleanall', help='supprimer le backup local ID, son instance et son volume')
+    cleanall.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    usage = sub.add_parser('diskusage', help='afficher la taille des sauvegardes et instances')
+    usage.add_argument('identifier', nargs='?', type=identifier_arg, help='limiter à ce backup local')
+    inventory = sub.add_parser('list', help='inventaire FTP, archives locales et instances restaurées')
     inventory.add_argument('--local-only', action='store_true', help='inventaire local sans connexion FTP')
     args = parser.parse_args()
     try:

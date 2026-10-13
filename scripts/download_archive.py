@@ -134,7 +134,7 @@ def matching_downloads(root, parts, remote_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--archive-name', help='nom exact d’une archive .jpa, .jps ou .zip sur le FTP')
-    parser.add_argument('--output-root', type=Path, default=ROOT / 'j6/backup/akeeba')
+    parser.add_argument('--output-root', type=Path, default=ROOT / 'backup')
     parser.add_argument('--resume', type=Path, help='reprendre un transfert interrompu dans un dossier daté existant')
     args = parser.parse_args()
     if args.archive_name and (Path(args.archive_name).name != args.archive_name or
@@ -149,6 +149,9 @@ def main():
         archive = args.archive_name or latest_archive(first)[1]
         if archive not in first:
             raise BackupError('Archive absente du dossier FTP : ' + archive)
+        identifier = long_id(archive)
+        if not identifier:
+            raise BackupError('Impossible de déduire un identifiant AAAAMMJJ-HHMMSS du nom de l’archive.')
         before = archive_signature(ftp, cfg['AKEEBA_REMOTE_DIR'], archive)
         parts = []
         for name in sorted(before):
@@ -168,13 +171,15 @@ def main():
 
         output_root = args.output_root.resolve()
         complete, partial = matching_downloads(output_root, parts, cfg['AKEEBA_REMOTE_DIR'])
-        if complete:
-            print('Archive déjà téléchargée : ' + str(max(complete)) + ' ; aucun nouveau transfert.')
+        matching = [path for path in complete if path.name == identifier]
+        if matching:
+            print('Archive déjà téléchargée : ' + str(matching[0]) + ' ; aucun nouveau transfert.')
             return
+        output = output_root / identifier
         if args.resume:
-            output = args.resume.resolve()
-            if output.parent != output_root:
-                raise BackupError('--resume doit désigner un dossier sous --output-root.')
+            resume = args.resume.resolve()
+            if resume != output.resolve():
+                raise BackupError('--resume doit désigner backup/ID pour cette archive.')
             if not output.is_dir() or (output / 'manifest.json').exists() or not (output / 'parts.json').is_file():
                 raise BackupError('--resume attend un dossier existant avec parts.json et sans manifest final.')
             old_parts = json.loads((output / 'parts.json').read_text())
@@ -182,11 +187,14 @@ def main():
             if comparable(old_parts) != comparable(parts):
                 raise BackupError('Le transfert interrompu correspond à une autre archive, un autre dossier FTP ou ses tailles ont changé.')
         elif partial:
-            output = max(partial)
+            output = next((path for path in partial if path.name == identifier), None)
+            if output is None:
+                raise BackupError('Un téléchargement partiel existe, mais pas sous son identifiant attendu : ' + identifier)
             print('Reprise automatique du transfert : ' + str(output), flush=True)
         else:
-            timestamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-            output = output_root / timestamp
+            output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if output.exists():
+                raise BackupError('Le dossier backup/' + identifier + ' existe sans correspondre à cette archive.')
             output.mkdir(parents=True, exist_ok=False, mode=0o700)
             save_json(output / 'parts.json', parts)
         completed = download(ftp, parts, output)

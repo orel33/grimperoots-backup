@@ -19,11 +19,11 @@ import urllib.parse
 import urllib.request
 
 from backup_common import Page
-from backup_ids import long_id
+from backup_ids import long_id, resolve
 from verify_restore import verify_run
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNS = ROOT / 'j6/runs'
+RUNTIME = ROOT / 'runtime'
 KICKSTART = ROOT / 'vendor/akeeba-kickstart/9.1.0'
 
 
@@ -42,16 +42,16 @@ def available_port():
         return sock.getsockname()[1]
 
 
-def compose_file(run_dir, archive_dir, port):
-    runtime = run_dir / 'runtime'
-    project = 'grimperoots-snapshot-' + run_dir.name.lower().replace('_', '-')
+def compose_file(instance_dir, archive_dir, port, project=None):
+    runtime = instance_dir / 'www'
+    project = project or ('grimperoots-snapshot-' + instance_dir.name.lower().replace('_', '-'))
     compose = f'''name: {project}
 services:
   web:
     image: grimperoots-backup-php83
     volumes:
       - {quote(str(ROOT / 'j6/docker/apache.conf') + ':/etc/apache2/sites-available/000-default.conf:ro')}
-      - {quote(str(runtime / 'www') + ':/var/www/html')}
+      - {quote(str(runtime) + ':/var/www/html')}
       - {quote(str(KICKSTART) + ':/opt/restore:ro')}
       - {quote(str(archive_dir) + ':/opt/deployment:ro')}
     depends_on:
@@ -93,14 +93,16 @@ networks:
 volumes:
   database:
 '''
-    (run_dir / 'compose.yaml').write_text(compose)
-    (run_dir / 'compose.yaml').chmod(0o600)
-    env_text = f'DB_PASSWORD={secrets.token_urlsafe(36)}\nDB_ROOT_PASSWORD={secrets.token_urlsafe(36)}\n'
-    (run_dir / '.env').write_text(env_text)
-    (run_dir / '.env').chmod(0o600)
+    (instance_dir / 'compose.yaml').write_text(compose)
+    (instance_dir / 'compose.yaml').chmod(0o600)
+    env_file = instance_dir / '.env'
+    if not env_file.exists():
+        env_text = f'DB_PASSWORD={secrets.token_urlsafe(36)}\nDB_ROOT_PASSWORD={secrets.token_urlsafe(36)}\n'
+        env_file.write_text(env_text)
+        env_file.chmod(0o600)
     wrapper = f'''#!/usr/bin/env bash
 set -euo pipefail
-cd {shlex.quote(str(run_dir))}
+cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")"
 compose=(docker compose --env-file .env -p {shlex.quote(project)} -f compose.yaml)
 case "${{1:-}}" in
   start) set -- up -d --wait ;;
@@ -111,8 +113,8 @@ case "${{1:-}}" in
 esac
 exec "${{compose[@]}}" "$@"
 '''
-    (run_dir / 'joomla.sh').write_text(wrapper)
-    (run_dir / 'joomla.sh').chmod(0o700)
+    (instance_dir / 'joomla.sh').write_text(wrapper)
+    (instance_dir / 'joomla.sh').chmod(0o700)
     return project, runtime
 
 
@@ -149,7 +151,8 @@ def finish_run(run_dir, metadata):
     print(f"Administration : {metadata['url']}administrator/", flush=True)
     identifier = long_id(metadata['archive'])
     if identifier:
-        print(f"Gestion de cette instance : ./j6.sh start {identifier} (ou status, stop, restart)", flush=True)
+        print(f"Gestion de cette instance : ./j6.sh start {identifier}, status {identifier}, "
+              f"stop {identifier} ou restart {identifier}", flush=True)
     print('Courriels désactivés et noindex activé ; l’archive et les autres instances sont conservées.')
 
 
@@ -193,7 +196,7 @@ def archive_sha256(archive_dir):
 
 
 def existing_runs_for_archive(digest, exclude=None):
-    roots = (RUNS,)
+    roots = (RUNTIME,)
     found = []
     for root in roots:
         if not root.is_dir():
@@ -210,48 +213,44 @@ def existing_runs_for_archive(digest, exclude=None):
     return found
 
 
-def run_name(archive, digest):
-    stem = Path(archive).stem.lower()
-    stem = re.sub(r'[^a-z0-9_-]+', '-', stem).strip('-_') or 'akeeba'
-    return f'{stem}-{digest[:12]}'
-
-
-def prepare_and_extract(run_dir, metadata, archive_dir, archive):
+def prepare_and_extract(instance_dir, metadata, archive_dir, archive):
     project = metadata['project']
-    runtime = run_dir / 'runtime'
+    runtime = instance_dir / 'www'
     image = run_docker('docker image inspect grimperoots-backup-php83', capture_output=True,
                        text=True, check=False)
     if image.returncode:
         print('Construction de l’image PHP locale requise pour Joomla 6…', flush=True)
         run_docker('docker compose -f j6/docker/build-compose.yaml build web', capture_output=True)
     print(f"Création de l’instance isolée sur le port {metadata['port']}…", flush=True)
-    docker_compose(run_dir, project, 'up -d --wait', capture_output=True)
+    docker_compose(instance_dir, project, 'up -d --wait', capture_output=True)
     metadata['stage'] = 'containers_ready'
-    write_run(run_dir, metadata)
-    command = ('docker compose --env-file ' + shlex.quote(str(run_dir / '.env')) +
-               ' -p ' + shlex.quote(project) + ' -f ' + shlex.quote(str(run_dir / 'compose.yaml')) +
+    write_run(instance_dir, metadata)
+    command = ('docker compose --env-file ' + shlex.quote(str(instance_dir / '.env')) +
+               ' -p ' + shlex.quote(project) + ' -f ' + shlex.quote(str(instance_dir / 'compose.yaml')) +
                ' exec -T web php /opt/restore/kickstart.php ' +
                shlex.quote('/opt/deployment/' + archive) + ' /var/www/html/j6 --silent')
     extraction = run_docker(command, capture_output=True)
-    (run_dir / 'extraction.log').write_bytes(extraction.stdout + extraction.stderr)
-    if not (runtime / 'www/j6/index.php').is_file():
-        raise RuntimeError('Extraction Kickstart incomplète ; journal conservé dans ce run.')
+    (instance_dir / 'extraction.log').write_bytes(extraction.stdout + extraction.stderr)
+    if not (runtime / 'j6/index.php').is_file():
+        raise RuntimeError('Extraction Kickstart incomplète ; journal conservé dans runtime/ID.')
     metadata['stage'] = 'files_extracted'
-    write_run(run_dir, metadata)
-    finish_run(run_dir, metadata)
+    write_run(instance_dir, metadata)
+    finish_run(instance_dir, metadata)
 
 
-def latest_download(root=ROOT / 'j6/backup/akeeba'):
+def latest_download(root=ROOT / 'backup'):
     candidates = []
     if not root.is_dir():
-        raise RuntimeError('Aucun dossier de sauvegardes locales trouvé dans j6/backup/akeeba/.')
+        raise RuntimeError('Aucun dossier de sauvegardes locales trouvé dans backup/.')
     for directory in root.iterdir():
         manifest_path = directory / 'manifest.json'
-        if not directory.is_dir() or not manifest_path.is_file():
+        if directory.is_symlink() or not directory.is_dir() or not manifest_path.is_file():
             continue
         try:
             manifest = json.loads(manifest_path.read_text())
             if manifest.get('source') != 'ftp-ovh-j6' or not manifest.get('archive'):
+                continue
+            if long_id(manifest['archive']) != directory.name:
                 continue
             downloaded = manifest.get('downloaded_at')
             if downloaded:
@@ -262,7 +261,7 @@ def latest_download(root=ROOT / 'j6/backup/akeeba'):
         except (OSError, ValueError):
             continue
     if not candidates:
-        raise RuntimeError('Aucun téléchargement FTP J6 complet trouvé dans j6/backup/akeeba/.')
+        raise RuntimeError('Aucun téléchargement FTP J6 complet trouvé dans backup/ID/.')
     return max(candidates, key=lambda item: item[0])[1]
 
 
@@ -281,15 +280,15 @@ def brs_api(opener, url, fields, run_dir):
         result = json.loads(match[1] if match else body)
     except ValueError:
         (run_dir / 'installer-response.html').write_text(body)
-        raise RuntimeError('Réponse Akeeba BRS inattendue ; diagnostic conservé dans le run local.') from None
+        raise RuntimeError('Réponse Akeeba BRS inattendue ; diagnostic conservé dans runtime/ID.') from None
     if isinstance(result, dict) and result.get('error'):
         (run_dir / 'installer-error.json').write_text(json.dumps(result))
-        raise RuntimeError('Akeeba BRS a signalé une erreur ; diagnostic conservé dans le run local.')
+        raise RuntimeError('Akeeba BRS a signalé une erreur ; diagnostic conservé dans runtime/ID.')
     return result
 
 
 def restore_database_and_finish(run_dir, port):
-    site = run_dir / 'runtime/www/j6'
+    site = run_dir / 'www/j6'
     definitions_path = site / 'installation/sql/databases.json'
     if not definitions_path.is_file():
         raise RuntimeError('Fichiers d’installation Akeeba absents après extraction.')
@@ -363,32 +362,54 @@ def restore_database_and_finish(run_dir, port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive_dir', type=Path, nargs='?',
-                        help='dossier créé par j6.sh download')
+                        help='dossier backup/ID créé par j6.sh download')
     parser.add_argument('--latest', action='store_true',
-                        help='choisir le dernier téléchargement FTP complet sous j6/backup/akeeba/')
-    parser.add_argument('--resume-run', type=Path,
-                        help='reprendre une restauration interrompue sans réextraire l’archive')
+                        help='choisir le dernier téléchargement FTP complet sous backup/')
+    parser.add_argument('--resume', metavar='ID',
+                        help='reprendre une restauration interrompue pour cet identifiant')
     parser.add_argument('--port', type=int, help='port local ; attribué automatiquement par défaut')
     args = parser.parse_args()
-    if args.resume_run:
+    if args.resume:
         if args.latest or args.archive_dir or args.port:
-            parser.error('--resume-run ne se combine pas avec une archive, --latest ou --port')
-        run_dir = args.resume_run.resolve()
+            parser.error('--resume ne se combine pas avec une archive, --latest ou --port')
+        instance_rows = []
+        if RUNTIME.is_dir():
+            for path in RUNTIME.iterdir():
+                try:
+                    metadata = json.loads((path / 'run.json').read_text())
+                    if metadata.get('archive'):
+                        instance_rows.append({'archive': metadata['archive'], 'path': path,
+                                              'metadata': metadata})
+                except (OSError, ValueError, TypeError):
+                    continue
+        selected = resolve(args.resume, instance_rows, 'instance locale')
+        if selected is None:
+            raise RuntimeError('Utiliser un identifiant AAAAMMJJ ou AAAAMMJJ-HHMMSS affiché par list.')
+        if selected['path'].is_symlink() or selected['path'].resolve().parent != RUNTIME.resolve():
+            raise RuntimeError('Instance hors du dossier runtime/ attendu.')
+        run_dir = selected['path'].resolve()
         metadata_path = run_dir / 'run.json'
         if not metadata_path.is_file():
-            raise RuntimeError('run.json absent dans ce dossier de restauration.')
+            raise RuntimeError('Métadonnées absentes dans runtime/ID.')
         metadata = json.loads(metadata_path.read_text())
-        if metadata.get('stage') == 'prepared':
+        if long_id(metadata.get('archive', '')) != run_dir.name:
+            raise RuntimeError('L’identifiant de l’instance ne correspond pas à son archive.')
+        if metadata.get('stage') in ('prepared', 'containers_ready'):
             archive_dir = Path(metadata['archive_dir'])
             archive = verify_archive(archive_dir)
             if archive != metadata.get('archive') or archive_sha256(archive_dir) != metadata.get('archive_sha256'):
-                raise RuntimeError('L’archive associée à ce run a changé ; reprise refusée.')
+                raise RuntimeError('L’archive associée à cette instance a changé ; reprise refusée.')
             if existing_runs_for_archive(metadata['archive_sha256'], exclude=run_dir):
-                raise RuntimeError('Une restauration de cette archive existe déjà. Utiliser son lanceur local ou examiner les runs existants.')
-            prepare_and_extract(run_dir, metadata, archive_dir, archive)
+                raise RuntimeError('Une restauration de cette archive existe déjà. Examiner les instances affichées par list.')
+            if metadata.get('stage') == 'containers_ready' and (run_dir / 'www/j6/index.php').is_file():
+                metadata['stage'] = 'files_extracted'
+                write_run(run_dir, metadata)
+                finish_run(run_dir, metadata)
+            else:
+                prepare_and_extract(run_dir, metadata, archive_dir, archive)
             return
         if metadata.get('stage') not in ('files_extracted', 'restoring_database', 'verifying'):
-            raise RuntimeError('La reprise exige un run au stade prepared, files_extracted, restoring_database ou verifying.')
+            raise RuntimeError('La reprise exige une instance au stade prepared, files_extracted, restoring_database ou verifying.')
         project = metadata['project']
         docker_compose(run_dir, project, 'up -d --wait', capture_output=True)
         finish_run(run_dir, metadata)
@@ -402,8 +423,8 @@ def main():
     if existing:
         details = '\n'.join(f'  {path} — {stage}' + (f' — {url}' if url else '')
                             for path, stage, url in existing)
-        raise RuntimeError('Cette archive a déjà un run local ; aucun nouvel espace disque ne sera créé.\n' +
-                           details + '\nUtiliser le lanceur d’une instance existante ; pour une restauration incomplète, utiliser --resume-run.')
+        raise RuntimeError('Cette archive a déjà une instance locale ; aucun nouvel espace disque ne sera créé.\n' +
+                           details + '\nUtiliser le lanceur d’une instance existante ; pour une restauration incomplète, utiliser --resume ID.')
     kickstart = KICKSTART / 'kickstart.php'
     metadata_file = KICKSTART / 'download.json'
     if not kickstart.is_file() or not metadata_file.is_file():
@@ -413,14 +434,17 @@ def main():
         raise RuntimeError('Empreinte SHA-256 de Kickstart Core incorrecte.')
     if args.port is not None and not 1024 <= args.port <= 65535:
         raise RuntimeError('Le port doit être compris entre 1024 et 65535.')
-    RUNS.mkdir(parents=True, exist_ok=True, mode=0o700)
-    run_dir = RUNS / run_name(archive, digest)
+    identifier = long_id(archive)
+    if not identifier:
+        raise RuntimeError('Impossible de déduire un identifiant AAAAMMJJ-HHMMSS du nom de l’archive.')
+    RUNTIME.mkdir(parents=True, exist_ok=True, mode=0o700)
+    run_dir = RUNTIME / identifier
     if run_dir.exists():
-        raise RuntimeError(f'Le dossier de restauration existe déjà : {run_dir}. Aucune extraction lancée.')
+        raise RuntimeError(f'Le dossier runtime/{identifier} existe déjà. Aucune extraction lancée.')
     run_dir.mkdir(mode=0o700)
     port = args.port or available_port()
     project, runtime = compose_file(run_dir, archive_dir, port)
-    (runtime / 'www/j6').mkdir(parents=True)
+    (runtime / 'j6').mkdir(parents=True)
     metadata = {'archive_dir': str(archive_dir), 'archive': archive, 'archive_sha256': digest, 'port': port,
                 'url': f'http://localhost:{port}/j6/', 'project': project, 'stage': 'prepared'}
     write_run(run_dir, metadata)
@@ -435,7 +459,7 @@ if __name__ == '__main__':
         raise SystemExit(130)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         if isinstance(error, subprocess.CalledProcessError):
-            message = 'Docker Compose a échoué ; examiner le dernier run sous j6/runs/.'
+            message = 'Docker Compose a échoué ; examiner runtime/ID.'
         else:
             message = str(error)
         print('Échec : ' + message, file=sys.stderr)

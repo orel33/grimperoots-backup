@@ -8,8 +8,10 @@ from pathlib import Path
 import urllib.parse
 import urllib.request
 
+from backup_ids import long_id, resolve
+
 ROOT = Path(__file__).resolve().parents[1]
-RUNS = ROOT / 'j6/runs'
+RUNTIME = ROOT / 'runtime'
 
 
 class Links(HTMLParser):
@@ -33,7 +35,7 @@ class LocalRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def verify_run(run_dir, port):
+def verify_run(instance_dir, port):
     base = f'http://localhost:{port}/j6/'
     opener = urllib.request.build_opener(LocalRedirects())
     results = []
@@ -72,7 +74,7 @@ def verify_run(run_dir, port):
     admin = fetch('administrator/', 'admin').decode('utf-8', errors='replace')
     if 'name="passwd"' not in admin:
         raise RuntimeError('Formulaire de connexion Joomla non trouvé.')
-    target = run_dir / 'verification.json'
+    target = instance_dir / 'verification.json'
     target.write_text(json.dumps({'url': base, 'http': results}, indent=2, ensure_ascii=False) + '\n')
     target.chmod(0o600)
     print('Rapport : ' + str(target))
@@ -80,13 +82,25 @@ def verify_run(run_dir, port):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('run', help='nom du run sous j6/runs/')
+    parser.add_argument('identifier', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     args = parser.parse_args()
-    if Path(args.run).name != args.run:
-        parser.error('indiquer un nom de run, sans chemin')
-    run_dir = RUNS / args.run
-    metadata = json.loads((run_dir / 'run.json').read_text())
-    verify_run(run_dir, int(metadata['port']))
+    rows = []
+    if RUNTIME.is_dir():
+        for path in RUNTIME.iterdir():
+            if path.is_symlink() or not path.is_dir():
+                continue
+            try:
+                metadata = json.loads((path / 'run.json').read_text())
+                if metadata.get('archive') and long_id(metadata['archive']) == path.name:
+                    rows.append({'archive': metadata['archive'], 'path': path, 'metadata': metadata})
+            except (OSError, ValueError, TypeError):
+                continue
+    selected = resolve(args.identifier, rows, 'instance locale')
+    if selected is None:
+        parser.error('utiliser un identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    instance_dir = selected['path']
+    metadata = selected['metadata']
+    verify_run(instance_dir, int(metadata['port']))
 
 
 if __name__ == '__main__':

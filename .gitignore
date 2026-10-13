@@ -3,7 +3,7 @@
 *.env
 /bak/
 /snapshots-j6/
-/j6/backup/
-/j6/runs/
+/backup/
+/runtime/
 /__pycache__/
 *.py[cod]
