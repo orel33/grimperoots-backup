@@ -64,8 +64,9 @@ la page de connexion d’administration. Le rapport est dans
 `j6/runs/RUN/verification.json` ; une erreur laisse le run pour diagnostic ou
 reprise. Seul le proxy expose un port, sur `127.0.0.1`.
 
-Les commandes `clean` et `cleanall ID` exigent un terminal et la saisie exacte
-du mot de confirmation affiché. `clean` supprime une copie restaurée et son
+Les commandes `clean ID` et `cleanall ID` exigent un identifiant, même lorsqu’il
+n’existe qu’un seul run, ainsi qu’un terminal et la saisie exacte du mot de
+confirmation affiché. `clean` supprime une copie restaurée et son
 volume en conservant le téléchargement local ; `cleanall ID` supprime aussi ce
 téléchargement et ses éventuelles reprises. Elles ne touchent pas à OVH.
 Conserver ce dépôt privé : les archives téléchargées contiennent les données du site.

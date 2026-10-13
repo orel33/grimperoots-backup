@@ -271,6 +271,8 @@ def run_command(args):
         from verify_restore import verify_run
         verify_run(run_dir, int(metadata['port']))
     elif args.action == 'clean':
+        if not args.run:
+            raise ValueError('Un identifiant est obligatoire pour clean.')
         run_dir, metadata = select_run(args.run)
         print(f'Suppression de {run_dir} et de son volume MySQL ; archives conservées.')
         confirm('CLEAN ' + (args.run or long_id(metadata['archive']) or run_dir.name))
@@ -323,9 +325,11 @@ def main():
     download.add_argument('identifier', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     restore = sub.add_parser('restore', help='restaurer la dernière archive locale dans un nouveau run')
     restore.add_argument('identifier', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    for action in ('start', 'status', 'stop', 'restart', 'clean', 'verify'):
+    for action in ('start', 'status', 'stop', 'restart', 'verify'):
         item = sub.add_parser(action)
         item.add_argument('run', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
+    clean = sub.add_parser('clean', help='supprimer une copie restaurée en conservant son archive locale')
+    clean.add_argument('run', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     cleanall = sub.add_parser('cleanall', help='supprimer un backup local, ses runs et volumes')
     cleanall.add_argument('identifier', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     usage = sub.add_parser('diskusage', help='afficher la taille des archives et runs')
