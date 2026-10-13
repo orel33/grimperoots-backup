@@ -277,19 +277,28 @@ def run_command(args):
         compose(run_dir, metadata, 'down', '--volumes', '--remove-orphans')
         shutil.rmtree(run_dir)
     elif args.action == 'cleanall':
-        if RUNS.is_dir():
-            known = set(known_runs())
-            unknown = [path.name for path in RUNS.iterdir() if path not in known]
-            if unknown:
-                raise ValueError('Dossiers de runs non reconnus ; cleanall annulé : ' + ', '.join(unknown))
-        runs = [select_run(path.name) for path in known_runs()]
-        print(f'Suppression de {len(runs)} run(s), de leurs volumes MySQL et de {BACKUP}.')
-        confirm('CLEANALL j6')
-        for run_dir, metadata in runs:
+        backups = local_inventory()
+        runs = run_inventory()
+        selected = resolve(args.identifier, backups + runs, 'backup local', allow_same_name=True)
+        if selected is None:
+            raise ValueError('Utiliser un identifiant AAAAMMJJ ou AAAAMMJJ-HHMMSS affiché par list.')
+        archive = selected['archive']
+        local_paths = [row['path'] for row in backups if row['archive'] == archive]
+        run_rows = [row for row in runs if row['archive'] == archive]
+        if any(path.is_symlink() or path.resolve().parent != RUNS.resolve() for path in
+               (row['path'] for row in run_rows)):
+            raise ValueError('Run hors du dossier attendu ; cleanall annulé.')
+        if any(path.is_symlink() or path.resolve().parent != BACKUP.resolve() for path in local_paths):
+            raise ValueError('Archive locale hors du dossier attendu ; cleanall annulé.')
+        print(f'Suppression de {len(run_rows)} run(s), de leurs volumes MySQL et de '
+              f'{len(local_paths)} téléchargement(s) local(aux) pour {archive}.')
+        confirm('CLEANALL ' + args.identifier)
+        for row in run_rows:
+            run_dir, metadata = select_run(row['path'].name)
             compose(run_dir, metadata, 'down', '--volumes', '--remove-orphans')
             shutil.rmtree(run_dir)
-        if BACKUP.exists():
-            shutil.rmtree(BACKUP)
+        for path in local_paths:
+            shutil.rmtree(path)
     elif args.action == 'diskusage':
         if args.identifier:
             local = [row for row in local_inventory() if long_id(row['archive']) and
@@ -317,7 +326,8 @@ def main():
     for action in ('start', 'status', 'stop', 'restart', 'clean', 'verify'):
         item = sub.add_parser(action)
         item.add_argument('run', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    sub.add_parser('cleanall', help='supprimer tous les runs, volumes et archives locales')
+    cleanall = sub.add_parser('cleanall', help='supprimer un backup local, ses runs et volumes')
+    cleanall.add_argument('identifier', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     usage = sub.add_parser('diskusage', help='afficher la taille des archives et runs')
     usage.add_argument('identifier', nargs='?', help='limiter à ce backup local')
     inventory = sub.add_parser('list', help='inventaire FTP, archives locales et restaurations')

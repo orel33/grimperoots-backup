@@ -32,7 +32,7 @@ sont ignorés par Git.
 | `./j6.sh start ID`, `stop ID`, `restart ID` | Gérer les conteneurs de cette copie. |
 | `./j6.sh status ID`, `verify ID` | Voir les conteneurs ou relancer les contrôles HTTP de cette copie. |
 | `./j6.sh clean ID` | Après confirmation, supprimer cette copie et son volume MySQL ; conserver les archives. |
-| `./j6.sh cleanall` | Après confirmation, supprimer toutes les copies, leurs volumes et les téléchargements locaux. |
+| `./j6.sh cleanall ID` | Après confirmation, supprimer ce téléchargement local, ses copies restaurées et leurs volumes. |
 | `./j6.sh diskusage [ID]` | Voir l’espace occupé par toutes les archives et copies, ou par un backup précis ; hors volumes et images Docker. |
 
 `list` interroge le dossier `AKEEBA_REMOTE_DIR` défini dans `.env`. L’identifiant
@@ -64,6 +64,8 @@ la page de connexion d’administration. Le rapport est dans
 `j6/runs/RUN/verification.json` ; une erreur laisse le run pour diagnostic ou
 reprise. Seul le proxy expose un port, sur `127.0.0.1`.
 
-Les commandes `clean` et `cleanall` exigent un terminal et la saisie exacte du
-mot de confirmation affiché. Elles ne touchent pas à OVH. Conserver ce dépôt
-privé : les archives téléchargées contiennent les données du site.
+Les commandes `clean` et `cleanall ID` exigent un terminal et la saisie exacte
+du mot de confirmation affiché. `clean` supprime une copie restaurée et son
+volume en conservant le téléchargement local ; `cleanall ID` supprime aussi ce
+téléchargement et ses éventuelles reprises. Elles ne touchent pas à OVH.
+Conserver ce dépôt privé : les archives téléchargées contiennent les données du site.

@@ -152,15 +152,6 @@ class Workflows(unittest.TestCase):
             self.assertIn(str(restore_archive.KICKSTART), compose)
             self.assertEqual(runtime, run_dir / 'runtime')
 
-    def test_cleanall_refuses_unknown_run_directory(self):
-        args = type('Args', (), {'action': 'cleanall'})()
-        with tempfile.TemporaryDirectory() as temp, \
-             mock.patch.object(manage_j6, 'RUNS', Path(temp) / 'runs'), \
-             mock.patch.object(manage_j6, 'BACKUP', Path(temp) / 'backup'):
-            (manage_j6.RUNS / 'unknown').mkdir(parents=True)
-            with self.assertRaisesRegex(ValueError, 'non reconnus'):
-                manage_j6.run_command(args)
-
     def test_list_prints_actionable_remote_identifier(self):
         args = type('Args', (), {'local_only': False})()
         rows = [{'archive': 'grimperoots-j6-20261010-112009.jpa', 'directory': '/backup/j6-latest',
