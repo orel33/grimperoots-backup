@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 
+from backup_ids import IDENTIFIER, display_ids, long_id, resolve
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / 'j6/runs'
 BACKUP = ROOT / 'j6/backup/akeeba'
@@ -33,9 +35,13 @@ def select_run(name):
             raise ValueError('Préciser le nom du run (./j6.sh status affiche les runs disponibles).')
         path = runs[0]
     else:
-        if Path(name).name != name or name in ('.', '..'):
-            raise ValueError('Le run doit être un nom sous j6/runs/, sans chemin.')
-        path = RUNS / name
+        if IDENTIFIER.fullmatch(name):
+            row = resolve(name, run_inventory(), 'run local')
+            path = row['path']
+        else:
+            if Path(name).name != name or name in ('.', '..'):
+                raise ValueError('Le run doit être un identifiant affiché par ./j6.sh list.')
+            path = RUNS / name
         if path.is_symlink() or not path.is_dir() or not (path / 'run.json').is_file():
             raise ValueError('Run introuvable : ' + name)
     metadata = json.loads((path / 'run.json').read_text())
@@ -47,30 +53,10 @@ def select_run(name):
 
 
 def select_backup(name):
-    path = Path(name)
-    if path.is_dir() and (path / 'manifest.json').is_file():
-        return path.resolve()
-    if Path(name).name != name or name in ('.', '..'):
-        raise ValueError('Utiliser un identifiant local affiché par ./j6.sh list.')
-    path = BACKUP / name
-    if (path / 'manifest.json').is_file():
-        return path
-    matches = []
-    if BACKUP.is_dir():
-        for directory in BACKUP.iterdir():
-            manifest_path = directory / 'manifest.json'
-            if not directory.is_dir() or not manifest_path.is_file():
-                continue
-            try:
-                if json.loads(manifest_path.read_text()).get('archive') == name:
-                    matches.append(directory)
-            except (OSError, ValueError):
-                continue
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        raise ValueError('Plusieurs téléchargements portent ce nom ; utiliser leur identifiant local affiché par list.')
-    raise ValueError('Archive locale introuvable : ' + name)
+    row = resolve(name, [row for row in local_inventory() if row['complete']], 'archive locale complète')
+    if row is None:
+        raise ValueError('Utiliser un identifiant AAAAMMJJ ou AAAAMMJJ-HHMMSS affiché par list.')
+    return row['path']
 
 
 def compose(run_dir, metadata, *args):
@@ -101,138 +87,179 @@ def format_size(size):
         size /= 1024
 
 
-def list_backups(args):
-    if not args.local_only:
-        from download_archive import connect, listing, settings
-        from backup_common import BackupError
-        directories = [args.remote_dir] if args.remote_dir else [PRODUCTION_REMOTE_DIR, REFERENCE_REMOTE_DIR]
-        remote_count = len(directories)
-        print('FTP OVH')
-        errors = []
-        for directory in directories:
-            try:
-                config = settings(directory)
-                ftp = connect(config)
-                try:
-                    entries = listing(ftp, config['AKEEBA_REMOTE_DIR'])
-                finally:
-                    ftp.close()
-                print('  ' + config['AKEEBA_REMOTE_DIR'])
-                archives = [(name, meta) for name, meta in entries.items()
-                            if re.fullmatch(r'.+\.(?:jpa|jps|zip)', name, re.IGNORECASE)]
-                if not archives:
-                    print('    aucune archive finale')
-                for name, meta in sorted(archives, key=lambda item: item[1]['modified'], reverse=True):
-                    stem, extension = name.rsplit('.', 1)
-                    prefix = 'z' if extension.lower() == 'zip' else 'j'
-                    pattern = re.compile(re.escape(stem) + r'\.' + prefix + r'(\d{2,})$', re.IGNORECASE)
-                    numbered = sorted(int(match[1]) for part in entries
-                                      if (match := pattern.fullmatch(part)))
-                    complete = numbered == list(range(1, len(numbered) + 1))
-                    members = [part for part in entries if pattern.fullmatch(part)] + [name]
-                    size = sum(entries[part]['size'] for part in members)
-                    label = 'série complète' if complete else 'partie manquante'
-                    remote_id = 'ftp:' + config['AKEEBA_REMOTE_DIR'] + '/' + name
-                    print(f"    {remote_id}  {format_size(size)}  {len(members)} partie(s)  "
-                          f"{meta['modified']} UTC  {label}")
-            except (*ftplib.all_errors, OSError, ValueError, BackupError) as error:
-                print(f'  {directory} : accès impossible ({error})')
-                errors.append(str(error))
-    else:
-        errors = []
-        remote_count = 0
+def remote_inventory():
+    from backup_common import BackupError
+    from download_archive import connect, listing, settings
 
-    print('Archives locales')
+    rows, errors = [], []
+    for directory in (PRODUCTION_REMOTE_DIR, REFERENCE_REMOTE_DIR):
+        try:
+            config = settings(directory)
+            ftp = connect(config)
+            try:
+                entries = listing(ftp, directory)
+            finally:
+                ftp.close()
+            for name, meta in entries.items():
+                if not re.fullmatch(r'.+\.(?:jpa|jps|zip)', name, re.IGNORECASE):
+                    continue
+                stem, extension = name.rsplit('.', 1)
+                prefix = 'z' if extension.lower() == 'zip' else 'j'
+                pattern = re.compile(re.escape(stem) + r'\.' + prefix + r'(\d{2,})$', re.IGNORECASE)
+                numbers = sorted(int(match[1]) for part in entries
+                                 if (match := pattern.fullmatch(part)))
+                members = [part for part in entries if pattern.fullmatch(part)] + [name]
+                rows.append({'archive': name, 'directory': directory,
+                             'size': sum(entries[part]['size'] for part in members),
+                             'parts': len(members), 'modified': meta['modified'],
+                             'complete': numbers == list(range(1, len(numbers) + 1))})
+        except (*ftplib.all_errors, OSError, ValueError, BackupError) as error:
+            errors.append((directory, str(error)))
+    return rows, errors
+
+
+def local_inventory():
+    rows = []
     if not BACKUP.is_dir():
-        print('  aucune')
-    else:
-        directories = sorted((path for path in BACKUP.iterdir() if path.is_dir()), reverse=True)
-        if not directories:
-            print('  aucune')
-        for path in directories:
-            try:
-                manifest_file = path / 'manifest.json'
-                if manifest_file.is_file():
-                    manifest = json.loads(manifest_file.read_text())
-                    parts = manifest['files']
-                    complete = all((path / part['name']).is_file() and
-                                   (path / part['name']).stat().st_size == part['size'] for part in parts)
-                    status = 'complet (tailles vérifiées)' if complete else 'fichier absent ou taille incorrecte'
-                    print(f"  {path.name}  {manifest['archive']}  {format_size(sum(p['size'] for p in parts))}  "
-                          f"{status}  {manifest.get('remote_directory', '?')}")
-                elif (path / 'parts.json').is_file():
-                    parts = json.loads((path / 'parts.json').read_text())
-                    total = sum(part['size'] for part in parts)
-                    received = 0
-                    for part in parts:
-                        file = path / part['name']
-                        partial = path / (part['name'] + '.partial')
-                        if file.is_file():
-                            received += min(file.stat().st_size, part['size'])
-                        elif partial.is_file():
-                            received += min(partial.stat().st_size, part['size'])
-                    archive = next((part['name'] for part in parts
-                                    if re.search(r'\.(?:jpa|jps|zip)$', part['name'], re.IGNORECASE)), parts[0]['name'])
-                    print(f"  {path.name}  {archive}  incomplet "
-                          f"{received / total:.1%}  {parts[-1]['remote'].rsplit('/', 1)[0]}")
-            except (OSError, ValueError, KeyError, ZeroDivisionError, TypeError) as error:
-                print(f'  {path.name}  métadonnées illisibles : {error}')
+        return rows
+    for path in sorted(BACKUP.iterdir(), reverse=True):
+        if not path.is_dir():
+            continue
+        try:
+            manifest_file = path / 'manifest.json'
+            if manifest_file.is_file():
+                manifest = json.loads(manifest_file.read_text())
+                parts = manifest['files']
+                complete = bool(parts) and all((path / part['name']).is_file() and
+                                               (path / part['name']).stat().st_size == part['size']
+                                               for part in parts)
+                rows.append({'archive': manifest['archive'], 'path': path,
+                             'directory': manifest.get('remote_directory', '?'),
+                             'size': sum(part['size'] for part in parts),
+                             'status': 'complet' if complete else 'fichier absent ou taille incorrecte',
+                             'complete': complete})
+            elif (path / 'parts.json').is_file():
+                parts = json.loads((path / 'parts.json').read_text())
+                if not parts:
+                    continue
+                total = sum(part['size'] for part in parts)
+                received = 0
+                for part in parts:
+                    file = path / part['name']
+                    partial = path / (part['name'] + '.partial')
+                    if file.is_file():
+                        received += min(file.stat().st_size, part['size'])
+                    elif partial.is_file():
+                        received += min(partial.stat().st_size, part['size'])
+                archive = next((part['name'] for part in parts
+                                if re.search(r'\.(?:jpa|jps|zip)$', part['name'], re.IGNORECASE)), parts[0]['name'])
+                rows.append({'archive': archive, 'path': path,
+                             'directory': parts[0]['remote'].rsplit('/', 1)[0],
+                             'size': total, 'status': f'incomplet {received / total:.1%}',
+                             'complete': False})
+        except (OSError, ValueError, KeyError, ZeroDivisionError, TypeError, IndexError):
+            continue
+    return rows
 
-    print('Restaurations locales')
-    runs = known_runs()
-    if not runs:
-        print('  aucune')
-    for path in runs:
+
+def run_inventory():
+    rows = []
+    for path in known_runs():
         try:
             metadata = json.loads((path / 'run.json').read_text())
-            print(f"  {path.name}  {metadata.get('stage', '?')}  {metadata.get('url', '')}")
-        except (OSError, ValueError) as error:
-            print(f'  {path.name}  métadonnées illisibles : {error}')
-    if remote_count and len(errors) == remote_count:
+            if metadata.get('archive'):
+                rows.append({'archive': metadata['archive'], 'path': path, 'metadata': metadata})
+        except (OSError, ValueError, TypeError):
+            continue
+    return rows
+
+
+def list_backups(args):
+    remote, errors = ([], []) if args.local_only else remote_inventory()
+    local = local_inventory()
+    runs = run_inventory()
+    displayed = ({} if errors else display_ids(row['archive'] for row in remote + local + runs))
+
+    def identifier(row):
+        stamp = long_id(row['archive'])
+        return displayed.get(stamp, stamp or '—')
+
+    print('FTP OVH')
+    if args.local_only:
+        print('  non consulté')
+    elif not remote:
+        print('  aucune archive disponible')
+    for row in sorted(remote, key=lambda item: item['modified'], reverse=True):
+        label = 'production' if row['directory'] == PRODUCTION_REMOTE_DIR else 'référence'
+        state = 'complet' if row['complete'] else 'partie manquante'
+        print(f"  {identifier(row)}  {label}  {format_size(row['size'])}  "
+              f"{row['parts']} partie(s)  {state}  {row['archive']}")
+    for directory, error in errors:
+        print(f'  {directory} : accès impossible ({error})')
+
+    print('Archives locales')
+    if not local:
+        print('  aucune')
+    for row in local:
+        print(f"  {identifier(row)}  {row['status']}  {format_size(row['size'])}  "
+              f"{row['archive']}  ({row['path'].name})")
+
+    print('Restaurations locales')
+    if not runs:
+        print('  aucune')
+    for row in runs:
+        metadata = row['metadata']
+        print(f"  {identifier(row)}  {metadata.get('stage', '?')}  "
+              f"{metadata.get('url', '')}  ({row['path'].name})")
+    if errors and len(errors) == 2:
         raise RuntimeError('Inventaire FTP impossible ; inventaire local affiché.')
 
 
 def run_command(args):
     if args.action == 'download':
         command = [sys.executable, str(SCRIPTS / 'download_archive.py')]
-        if args.archive and args.archive.startswith('ftp:'):
-            if args.reference or args.remote_dir:
-                raise ValueError('Un identifiant ftp: contient déjà son dossier ; retirer --reference/--remote-dir.')
-            remote = args.archive[4:]
-            directory, separator, archive = remote.rpartition('/')
-            if not separator or not directory.startswith('/') or not archive:
-                raise ValueError('Identifiant FTP invalide : ' + args.archive)
-            command += ['--remote-dir', directory, '--archive-name', archive]
-        elif args.archive:
-            command += ['--archive-name', args.archive]
-        if args.reference and not (args.archive and args.archive.startswith('ftp:')):
-            command += ['--remote-dir', REFERENCE_REMOTE_DIR]
-        elif args.remote_dir:
-            command += ['--remote-dir', args.remote_dir]
-        elif not (args.archive and args.archive.startswith('ftp:')):
+        if args.identifier:
+            rows, errors = remote_inventory()
+            if errors:
+                raise RuntimeError('Impossible de résoudre l’identifiant : inventaire FTP incomplet.')
+            row = resolve(args.identifier, rows, 'archive FTP', allow_same_name=True)
+            if row is None:
+                raise ValueError('Utiliser un identifiant AAAAMMJJ ou AAAAMMJJ-HHMMSS affiché par list.')
+            if not row['complete']:
+                raise ValueError('La série de cette archive FTP est incomplète.')
+            command += ['--remote-dir', row['directory'], '--archive-name', row['archive']]
+        else:
             command += ['--remote-dir', PRODUCTION_REMOTE_DIR]
-        if args.resume:
-            command += ['--resume', str(args.resume)]
         subprocess.run(command, check=True)
     elif args.action == 'restore':
         command = [sys.executable, str(SCRIPTS / 'restore_archive.py')]
-        if args.resume_run:
-            run_dir, _ = select_run(args.resume_run)
-            command += ['--resume-run', str(run_dir)]
-        elif args.backup or args.archive:
-            command.append(str(select_backup(args.backup or str(args.archive))))
+        if args.identifier:
+            backup = select_backup(args.identifier)
         else:
-            command.append('--latest')
-        if args.port is not None:
-            command += ['--port', str(args.port)]
+            from restore_archive import latest_download
+            backup = latest_download()
+        matching = [row for row in run_inventory()
+                    if Path(row['metadata'].get('archive_dir', '')).resolve() == backup.resolve()]
+        if len(matching) > 1:
+            raise ValueError('Plusieurs runs correspondent à cette archive ; examiner ./j6.sh list.')
+        if matching:
+            row = matching[0]
+            if row['metadata'].get('stage') == 'complete':
+                print('Archive déjà restaurée : ' + row['metadata'].get('url', str(row['path'])))
+                return
+            command += ['--resume-run', str(row['path'])]
+        else:
+            command.append(str(backup))
         subprocess.run(command, check=True)
     elif args.action == 'status' and args.run is None:
-        runs = known_runs()
+        runs = run_inventory()
         if not runs:
             print('Aucune restauration locale sous j6/runs/.')
-        for path in runs:
-            _, metadata = select_run(path.name)
-            print(f"{path.name}\t{metadata.get('stage', '?')}\t{metadata.get('url', '')}")
+        displayed = display_ids(row['archive'] for row in runs)
+        for row in runs:
+            path, metadata = select_run(row['path'].name)
+            print(f"{displayed.get(long_id(row['archive']), '?')}\t"
+                  f"{metadata.get('stage', '?')}\t{metadata.get('url', '')}")
             compose(path, metadata, 'ps')
     elif args.action in ('start', 'stop', 'restart', 'status'):
         run_dir, metadata = select_run(args.run)
@@ -250,7 +277,7 @@ def run_command(args):
     elif args.action == 'clean':
         run_dir, metadata = select_run(args.run)
         print(f'Suppression de {run_dir} et de son volume MySQL ; archives conservées.')
-        confirm('CLEAN ' + run_dir.name)
+        confirm('CLEAN ' + (args.run or long_id(metadata['archive']) or run_dir.name))
         compose(run_dir, metadata, 'down', '--volumes', '--remove-orphans')
         shutil.rmtree(run_dir)
     elif args.action == 'cleanall':
@@ -268,7 +295,16 @@ def run_command(args):
         if BACKUP.exists():
             shutil.rmtree(BACKUP)
     elif args.action == 'diskusage':
-        for path in (BACKUP, RUNS):
+        if args.identifier:
+            local = [row for row in local_inventory() if long_id(row['archive']) and
+                     args.identifier in (long_id(row['archive']), long_id(row['archive'])[:8])]
+            runs = [row for row in run_inventory() if long_id(row['archive']) and
+                    args.identifier in (long_id(row['archive']), long_id(row['archive'])[:8])]
+            resolve(args.identifier, local + runs, 'backup local', allow_same_name=True)
+            paths = [row['path'] for row in local + runs]
+        else:
+            paths = (BACKUP, RUNS)
+        for path in paths:
             print(f'{format_size(disk_size(path))}\t{path}')
         print('Volumes et images Docker exclus.')
     elif args.action == 'list':
@@ -278,34 +314,19 @@ def run_command(args):
 def main():
     parser = argparse.ArgumentParser(prog='./j6.sh', description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
-    download = sub.add_parser('download', help='télécharger la dernière archive Akeeba J6')
-    download.add_argument('archive', nargs='?', help='identifiant ftp: affiché par list ou nom exact d’archive')
-    source = download.add_mutually_exclusive_group()
-    source.add_argument('--latest', action='store_true', help='alias du dossier de production par défaut')
-    source.add_argument('--reference', action='store_true', help='archive de référence J6 du 4 octobre 2026')
-    source.add_argument('--remote-dir', help='autre dossier FTP absolu')
-    download.add_argument('--resume', type=Path, help='dossier de transfert incomplet ; reprise automatique sinon')
+    download = sub.add_parser('download', help='télécharger une archive FTP, ou la dernière en production')
+    download.add_argument('identifier', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     restore = sub.add_parser('restore', help='restaurer la dernière archive locale dans un nouveau run')
-    restore.add_argument('backup', nargs='?', help='identifiant local ou nom d’archive affiché par list')
-    selection = restore.add_mutually_exclusive_group()
-    selection.add_argument('--archive', type=Path, help='dossier de téléchargement à restaurer')
-    selection.add_argument('--resume-run', help='nom du run à reprendre')
-    restore.add_argument('--port', type=int, help='port HTTP local (attribué automatiquement sinon)')
+    restore.add_argument('identifier', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     for action in ('start', 'status', 'stop', 'restart', 'clean', 'verify'):
         item = sub.add_parser(action)
-        item.add_argument('run', nargs='?', help='nom du run sous j6/runs/')
+        item.add_argument('run', nargs='?', help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     sub.add_parser('cleanall', help='supprimer tous les runs, volumes et archives locales')
-    sub.add_parser('diskusage', help='afficher la taille des archives et runs')
+    usage = sub.add_parser('diskusage', help='afficher la taille des archives et runs')
+    usage.add_argument('identifier', nargs='?', help='limiter à ce backup local')
     inventory = sub.add_parser('list', help='inventaire FTP, archives locales et restaurations')
     inventory.add_argument('--local-only', action='store_true', help='inventaire local sans connexion FTP')
-    inventory.add_argument('--remote-dir', help='limiter l’inventaire FTP à ce dossier')
     args = parser.parse_args()
-    if args.action == 'download' and args.archive and args.latest:
-        parser.error('choisir un nom d’archive ou --latest')
-    if args.action == 'restore' and args.backup and (args.archive or args.resume_run):
-        parser.error('choisir un backup, --archive ou --resume-run')
-    if args.action == 'restore' and args.resume_run and args.port is not None:
-        parser.error('--port ne se combine pas avec --resume-run')
     try:
         run_command(args)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:

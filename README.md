@@ -20,42 +20,37 @@ sont ignorés par Git.
 
 | Commande | Effet |
 | --- | --- |
-| `./j6.sh list` | Inventaire FTP, téléchargements locaux et restaurations. Affiche les identifiants utilisables ci-dessous. |
+| `./j6.sh list` | Inventaire FTP, téléchargements locaux et restaurations avec leur identifiant. |
 | `./j6.sh list --local-only` | Inventaire local sans connexion FTP. |
 | `./j6.sh download` | Télécharger la dernière archive du dossier de production. |
-| `./j6.sh download ftp:/backup/j6-latest/NOM.jpa` | Télécharger l’archive désignée par son identifiant FTP affiché par `list`. |
-| `./j6.sh download NOM.jpa` | Télécharger cette archive précise depuis le dossier de production. |
-| `./j6.sh download --reference` | Utiliser le dossier de référence `/backup/j6-20261004/`. |
-| `./j6.sh restore` | Restaurer le dernier téléchargement local complet dans une nouvelle copie. |
-| `./j6.sh restore IDENTIFIANT_LOCAL` | Restaurer le téléchargement local désigné par `list`. |
-| `./j6.sh restore --resume-run RUN` | Reprendre une restauration interrompue. |
+| `./j6.sh download ID` | Télécharger l’archive FTP désignée par `list`, depuis la production ou le dossier de référence. Reprendre automatiquement un transfert interrompu. |
+| `./j6.sh restore` | Restaurer le dernier téléchargement local complet, ou retrouver sa copie existante. |
+| `./j6.sh restore ID` | Restaurer le téléchargement local désigné par `list`, ou reprendre sa restauration interrompue. |
 | `./j6.sh status` | Lister les copies, leur étape de restauration et leurs conteneurs Docker. |
-| `./j6.sh start RUN`, `stop RUN`, `restart RUN` | Gérer les conteneurs de cette copie. |
-| `./j6.sh status RUN`, `verify RUN` | Voir les conteneurs ou relancer les contrôles HTTP de cette copie. |
-| `./j6.sh clean RUN` | Après confirmation, supprimer cette copie et son volume MySQL ; conserver les archives. |
+| `./j6.sh start ID`, `stop ID`, `restart ID` | Gérer les conteneurs de cette copie. |
+| `./j6.sh status ID`, `verify ID` | Voir les conteneurs ou relancer les contrôles HTTP de cette copie. |
+| `./j6.sh clean ID` | Après confirmation, supprimer cette copie et son volume MySQL ; conserver les archives. |
 | `./j6.sh cleanall` | Après confirmation, supprimer toutes les copies, leurs volumes et les téléchargements locaux. |
-| `./j6.sh diskusage` | Voir l’espace occupé par les archives et les fichiers des copies, hors volumes et images Docker. |
+| `./j6.sh diskusage [ID]` | Voir l’espace occupé par toutes les archives et copies, ou par un backup précis ; hors volumes et images Docker. |
 
-`list` interroge `/backup/j6-latest/` et `/backup/j6-20261004/`. Un identifiant
-`ftp:/chemin/dossier/nom.jpa` désigne une archive distante et peut être passé
-directement à `download`. Un identifiant local est le nom du sous-dossier dans
-`j6/backup/akeeba/` et peut être passé à `restore`. Une restauration possède un
-nom de run affiché par `list` ou `status`, utilisable par les commandes de gestion.
+`list` interroge `/backup/j6-latest/` et `/backup/j6-20261004/`. L’identifiant
+vient de l’horodatage du nom Akeeba : `20261010` si une seule archive porte
+cette date dans l’inventaire complet, ou `20261010-112009` si plusieurs archives
+du même jour imposent de préciser l’heure. Le même identifiant s’utilise pour `download`, `restore`
+et la gestion d’une copie. Une commande refuse un identifiant ambigu.
 
-`download --latest` reste accepté comme alias du dossier de production.
-`download --remote-dir CHEMIN` permet de choisir un autre dossier FTP.
 Un téléchargement interrompu reprend automatiquement au prochain `download`
-de la même archive distante. `download --resume j6/backup/akeeba/IDENTIFIANT`
-permet de désigner explicitement le transfert partiel. Le téléchargeur attend
+de la même archive distante. Le téléchargeur attend
 45 secondes pour vérifier que les tailles et dates distantes restent stables,
 contrôle la continuité des parties, puis écrit `manifest.json` et `SHA256SUMS`.
 
-Les archives résident sous `j6/backup/akeeba/IDENTIFIANT/`. Une restauration
+Les archives résident sous `j6/backup/akeeba/` dans des dossiers internes datés
+du téléchargement. Une restauration
 vérifie à nouveau taille et SHA-256 de chaque partie, puis crée
 `j6/runs/NOM-EMPREINTE/` avec ses propres fichiers, sa base MySQL, son projet
 Compose, son port local et son `joomla.sh`. Une même archive n’est restaurée
 qu’une fois ; ses copies et les archives restent conservées. Pour les commandes
-qui ciblent un run, son nom peut être omis lorsqu’il est le seul présent.
+qui ciblent un run, l’identifiant peut être omis lorsqu’il est le seul présent.
 
 Kickstart extrait les fichiers et ANGIE/BRS importe la base. Le site restauré
 désactive l’envoi de courriels, applique `noindex` et n’interprète pas le

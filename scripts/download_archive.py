@@ -12,6 +12,7 @@ import sys
 import time
 
 from backup_common import BackupError, download, save_json, sha256
+from backup_ids import long_id
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / '.env.local'
@@ -214,7 +215,11 @@ def main():
         (output / 'SHA256SUMS').write_text(''.join(f"{item['sha256']}  {item['name']}\n" for item in completed))
         (output / 'SHA256SUMS').chmod(0o600)
         print(f"Archive J6 rapatriée et vérifiée : {output} ({manifest['total_bytes'] / 1e9:.2f} Go).", flush=True)
-        print('Utiliser ensuite ./j6.sh restore ' + output.name + '. Le backup distant est conservé.')
+        identifier = long_id(archive)
+        if identifier:
+            print('Utiliser ensuite ./j6.sh restore ' + identifier + '. Le backup distant est conservé.')
+        else:
+            print('Consulter ./j6.sh list pour la restauration. Le backup distant est conservé.')
     finally:
         if ftp is not None:
             ftp.close()

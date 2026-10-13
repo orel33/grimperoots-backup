@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 
 from backup_common import Page
+from backup_ids import long_id
 from verify_restore import verify_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,7 +147,9 @@ def finish_run(run_dir, metadata):
     write_run(run_dir, metadata)
     print(f"Restauration terminée : {metadata['url']}", flush=True)
     print(f"Administration : {metadata['url']}administrator/", flush=True)
-    print(f"Gestion de cette instance : {run_dir / 'joomla.sh'} start|status|stop|restart", flush=True)
+    identifier = long_id(metadata['archive'])
+    if identifier:
+        print(f"Gestion de cette instance : ./j6.sh start {identifier} (ou status, stop, restart)", flush=True)
     print('Courriels désactivés et noindex activé ; l’archive et les autres instances sont conservées.')
 
 
