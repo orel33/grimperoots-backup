@@ -19,10 +19,11 @@ import urllib.parse
 import urllib.request
 
 from backup_common import Page
+from verify_restore import verify_run
 
-ROOT = Path(__file__).resolve().parents[0]
-RUNS = ROOT / 'snapshots-j6/runs'
-KICKSTART = ROOT / 'restore/runtime/tools'
+ROOT = Path(__file__).resolve().parents[1]
+RUNS = ROOT / 'j6/runs'
+KICKSTART = ROOT / 'vendor/akeeba-kickstart/9.1.0'
 
 
 def run_docker(command, cwd=ROOT, **kwargs):
@@ -48,7 +49,7 @@ services:
   web:
     image: grimperoots-backup-php83
     volumes:
-      - {quote(str(ROOT / 'docker/apache.conf') + ':/etc/apache2/sites-available/000-default.conf:ro')}
+      - {quote(str(ROOT / 'j6/docker/apache.conf') + ':/etc/apache2/sites-available/000-default.conf:ro')}
       - {quote(str(runtime / 'www') + ':/var/www/html')}
       - {quote(str(KICKSTART) + ':/opt/restore:ro')}
       - {quote(str(archive_dir) + ':/opt/deployment:ro')}
@@ -63,7 +64,7 @@ services:
     image: nginx:1.28-alpine
     ports: ["127.0.0.1:{port}:8080"]
     volumes:
-      - {quote(str(ROOT / 'docker/proxy.conf') + ':/etc/nginx/conf.d/default.conf:ro')}
+      - {quote(str(ROOT / 'j6/docker/proxy.conf') + ':/etc/nginx/conf.d/default.conf:ro')}
     depends_on: [web]
     networks: [isolated, access]
     restart: "no"
@@ -129,10 +130,14 @@ def write_run(run_dir, metadata):
 
 def finish_run(run_dir, metadata):
     port = int(metadata['port'])
-    metadata['stage'] = 'restoring_database'
-    write_run(run_dir, metadata)
     try:
-        restore_database_and_finish(run_dir, port)
+        if metadata.get('stage') != 'verifying':
+            metadata['stage'] = 'restoring_database'
+            write_run(run_dir, metadata)
+            restore_database_and_finish(run_dir, port)
+            metadata['stage'] = 'verifying'
+            write_run(run_dir, metadata)
+        verify_run(run_dir, port)
     except BaseException:
         (run_dir / 'restore-traceback.txt').write_text(traceback.format_exc())
         (run_dir / 'restore-traceback.txt').chmod(0o600)
@@ -148,7 +153,7 @@ def finish_run(run_dir, metadata):
 def verify_archive(archive_dir):
     manifest_path = archive_dir / 'manifest.json'
     if not manifest_path.is_file():
-        raise RuntimeError('manifest.json absent : utiliser une archive rapatriée par download_latest_akeeba_j6.py.')
+        raise RuntimeError('manifest.json absent : utiliser une archive rapatriée par ./j6.sh download.')
     manifest = json.loads(manifest_path.read_text())
     archive = manifest.get('archive', '')
     if not re.fullmatch(r'.+\.(?:jpa|jps|zip)', archive, re.IGNORECASE):
@@ -176,13 +181,16 @@ def verify_archive(archive_dir):
     return archive
 
 
-def archive_sha256(archive_dir, archive):
+def archive_sha256(archive_dir):
     manifest = json.loads((archive_dir / 'manifest.json').read_text())
-    return next(item['sha256'] for item in manifest['files'] if item['name'] == archive)
+    digest = hashlib.sha256()
+    for item in sorted(manifest['files'], key=lambda row: row['name']):
+        digest.update(item['name'].encode() + b'\0' + bytes.fromhex(item['sha256']))
+    return digest.hexdigest()
 
 
-def existing_runs_for_archive(archive, digest, exclude=None):
-    roots = (RUNS, ROOT.parent / 'grimperoots-migration/snapshots-j6/runs')
+def existing_runs_for_archive(digest, exclude=None):
+    roots = (RUNS,)
     found = []
     for root in roots:
         if not root.is_dir():
@@ -192,15 +200,7 @@ def existing_runs_for_archive(archive, digest, exclude=None):
                 continue
             try:
                 metadata = json.loads(metadata_path.read_text())
-                same = metadata.get('archive_sha256') == digest
-                if not same and metadata.get('archive') == archive:
-                    old_dir = Path(metadata.get('archive_dir', ''))
-                    manifest_path = old_dir / 'manifest.json'
-                    if manifest_path.is_file():
-                        old_manifest = json.loads(manifest_path.read_text())
-                        same = next((item.get('sha256') for item in old_manifest.get('files', [])
-                                     if item.get('name') == archive), None) == digest
-                if same:
+                if metadata.get('archive_sha256') == digest:
                     found.append((metadata_path.parent, metadata.get('stage', 'unknown'), metadata.get('url')))
             except (OSError, ValueError, TypeError):
                 continue
@@ -220,7 +220,7 @@ def prepare_and_extract(run_dir, metadata, archive_dir, archive):
                        text=True, check=False)
     if image.returncode:
         print('Construction de l’image PHP locale requise pour Joomla 6…', flush=True)
-        run_docker('docker compose -f docker/build-compose.yaml build web', capture_output=True)
+        run_docker('docker compose -f j6/docker/build-compose.yaml build web', capture_output=True)
     print(f"Création de l’instance isolée sur le port {metadata['port']}…", flush=True)
     docker_compose(run_dir, project, 'up -d --wait', capture_output=True)
     metadata['stage'] = 'containers_ready'
@@ -238,10 +238,10 @@ def prepare_and_extract(run_dir, metadata, archive_dir, archive):
     finish_run(run_dir, metadata)
 
 
-def latest_download(root=ROOT / 'bak/akeeba-j6'):
+def latest_download(root=ROOT / 'j6/backup/akeeba'):
     candidates = []
     if not root.is_dir():
-        raise RuntimeError('Aucun dossier de sauvegardes locales trouvé dans bak/akeeba-j6/.')
+        raise RuntimeError('Aucun dossier de sauvegardes locales trouvé dans j6/backup/akeeba/.')
     for directory in root.iterdir():
         manifest_path = directory / 'manifest.json'
         if not directory.is_dir() or not manifest_path.is_file():
@@ -259,7 +259,7 @@ def latest_download(root=ROOT / 'bak/akeeba-j6'):
         except (OSError, ValueError):
             continue
     if not candidates:
-        raise RuntimeError('Aucun téléchargement FTP J6 complet trouvé dans bak/akeeba-j6/.')
+        raise RuntimeError('Aucun téléchargement FTP J6 complet trouvé dans j6/backup/akeeba/.')
     return max(candidates, key=lambda item: item[0])[1]
 
 
@@ -360,9 +360,9 @@ def restore_database_and_finish(run_dir, port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive_dir', type=Path, nargs='?',
-                        help='dossier créé par download_latest_akeeba_j6.py')
+                        help='dossier créé par j6.sh download')
     parser.add_argument('--latest', action='store_true',
-                        help='choisir le dernier téléchargement FTP complet sous bak/akeeba-j6/')
+                        help='choisir le dernier téléchargement FTP complet sous j6/backup/akeeba/')
     parser.add_argument('--resume-run', type=Path,
                         help='reprendre une restauration interrompue sans réextraire l’archive')
     parser.add_argument('--port', type=int, help='port local ; attribué automatiquement par défaut')
@@ -378,14 +378,14 @@ def main():
         if metadata.get('stage') == 'prepared':
             archive_dir = Path(metadata['archive_dir'])
             archive = verify_archive(archive_dir)
-            if archive != metadata.get('archive') or archive_sha256(archive_dir, archive) != metadata.get('archive_sha256'):
+            if archive != metadata.get('archive') or archive_sha256(archive_dir) != metadata.get('archive_sha256'):
                 raise RuntimeError('L’archive associée à ce run a changé ; reprise refusée.')
-            if existing_runs_for_archive(archive, metadata['archive_sha256'], exclude=run_dir):
+            if existing_runs_for_archive(metadata['archive_sha256'], exclude=run_dir):
                 raise RuntimeError('Une restauration de cette archive existe déjà. Utiliser son lanceur local ou examiner les runs existants.')
             prepare_and_extract(run_dir, metadata, archive_dir, archive)
             return
-        if metadata.get('stage') not in ('files_extracted', 'restoring_database'):
-            raise RuntimeError('La reprise exige un run au stade prepared, files_extracted ou restoring_database.')
+        if metadata.get('stage') not in ('files_extracted', 'restoring_database', 'verifying'):
+            raise RuntimeError('La reprise exige un run au stade prepared, files_extracted, restoring_database ou verifying.')
         project = metadata['project']
         docker_compose(run_dir, project, 'up -d --wait', capture_output=True)
         finish_run(run_dir, metadata)
@@ -394,15 +394,20 @@ def main():
         parser.error('indiquer soit un dossier d’archive, soit --latest')
     archive_dir = (latest_download() if args.latest else args.archive_dir.resolve())
     archive = verify_archive(archive_dir)
-    digest = archive_sha256(archive_dir, archive)
-    existing = existing_runs_for_archive(archive, digest)
+    digest = archive_sha256(archive_dir)
+    existing = existing_runs_for_archive(digest)
     if existing:
         details = '\n'.join(f'  {path} — {stage}' + (f' — {url}' if url else '')
                             for path, stage, url in existing)
         raise RuntimeError('Cette archive a déjà un run local ; aucun nouvel espace disque ne sera créé.\n' +
                            details + '\nUtiliser le lanceur d’une instance existante ; pour une restauration incomplète, utiliser --resume-run.')
-    if not (KICKSTART / 'kickstart.php').is_file():
-        raise RuntimeError('Kickstart Core absent dans restore/runtime/tools/.')
+    kickstart = KICKSTART / 'kickstart.php'
+    metadata_file = KICKSTART / 'download.json'
+    if not kickstart.is_file() or not metadata_file.is_file():
+        raise RuntimeError('Kickstart Core absent dans vendor/akeeba-kickstart/9.1.0/.')
+    source = json.loads(metadata_file.read_text())
+    if source.get('version') != '9.1.0' or hashlib.sha256(kickstart.read_bytes()).hexdigest() != source.get('php_sha256'):
+        raise RuntimeError('Empreinte SHA-256 de Kickstart Core incorrecte.')
     if args.port is not None and not 1024 <= args.port <= 65535:
         raise RuntimeError('Le port doit être compris entre 1024 et 65535.')
     RUNS.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -427,7 +432,7 @@ if __name__ == '__main__':
         raise SystemExit(130)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         if isinstance(error, subprocess.CalledProcessError):
-            message = 'Docker Compose a échoué ; examiner le dernier run sous snapshots-j6/runs/.'
+            message = 'Docker Compose a échoué ; examiner le dernier run sous j6/runs/.'
         else:
             message = str(error)
         print('Échec : ' + message, file=sys.stderr)
