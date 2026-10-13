@@ -17,8 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / 'j6/runs'
 BACKUP = ROOT / 'j6/backup/akeeba'
 SCRIPTS = ROOT / 'scripts'
-PRODUCTION_REMOTE_DIR = '/backup/j6-latest'
-REFERENCE_REMOTE_DIR = '/backup/j6-20261004'
 
 
 def known_runs():
@@ -92,29 +90,30 @@ def remote_inventory():
     from download_archive import connect, listing, settings
 
     rows, errors = [], []
-    for directory in (PRODUCTION_REMOTE_DIR, REFERENCE_REMOTE_DIR):
+    directory = '.env'
+    try:
+        config = settings()
+        directory = config['AKEEBA_REMOTE_DIR']
+        ftp = connect(config)
         try:
-            config = settings(directory)
-            ftp = connect(config)
-            try:
-                entries = listing(ftp, directory)
-            finally:
-                ftp.close()
-            for name, meta in entries.items():
-                if not re.fullmatch(r'.+\.(?:jpa|jps|zip)', name, re.IGNORECASE):
-                    continue
-                stem, extension = name.rsplit('.', 1)
-                prefix = 'z' if extension.lower() == 'zip' else 'j'
-                pattern = re.compile(re.escape(stem) + r'\.' + prefix + r'(\d{2,})$', re.IGNORECASE)
-                numbers = sorted(int(match[1]) for part in entries
-                                 if (match := pattern.fullmatch(part)))
-                members = [part for part in entries if pattern.fullmatch(part)] + [name]
-                rows.append({'archive': name, 'directory': directory,
-                             'size': sum(entries[part]['size'] for part in members),
-                             'parts': len(members), 'modified': meta['modified'],
-                             'complete': numbers == list(range(1, len(numbers) + 1))})
-        except (*ftplib.all_errors, OSError, ValueError, BackupError) as error:
-            errors.append((directory, str(error)))
+            entries = listing(ftp, directory)
+        finally:
+            ftp.close()
+        for name, meta in entries.items():
+            if not re.fullmatch(r'.+\.(?:jpa|jps|zip)', name, re.IGNORECASE):
+                continue
+            stem, extension = name.rsplit('.', 1)
+            prefix = 'z' if extension.lower() == 'zip' else 'j'
+            pattern = re.compile(re.escape(stem) + r'\.' + prefix + r'(\d{2,})$', re.IGNORECASE)
+            numbers = sorted(int(match[1]) for part in entries
+                             if (match := pattern.fullmatch(part)))
+            members = [part for part in entries if pattern.fullmatch(part)] + [name]
+            rows.append({'archive': name, 'directory': directory,
+                         'size': sum(entries[part]['size'] for part in members),
+                         'parts': len(members), 'modified': meta['modified'],
+                         'complete': numbers == list(range(1, len(numbers) + 1))})
+    except (*ftplib.all_errors, OSError, ValueError, BackupError) as error:
+        errors.append((directory, str(error)))
     return rows, errors
 
 
@@ -190,10 +189,9 @@ def list_backups(args):
     elif not remote:
         print('  aucune archive disponible')
     for row in sorted(remote, key=lambda item: item['modified'], reverse=True):
-        label = 'production' if row['directory'] == PRODUCTION_REMOTE_DIR else 'référence'
         state = 'complet' if row['complete'] else 'partie manquante'
-        print(f"  {identifier(row)}  {label}  {format_size(row['size'])}  "
-              f"{row['parts']} partie(s)  {state}  {row['archive']}")
+        print(f"  {identifier(row)}  {format_size(row['size'])}  "
+              f"{row['parts']} partie(s)  {state}  {row['archive']}  ({row['directory']})")
     for directory, error in errors:
         print(f'  {directory} : accès impossible ({error})')
 
@@ -211,7 +209,7 @@ def list_backups(args):
         metadata = row['metadata']
         print(f"  {identifier(row)}  {metadata.get('stage', '?')}  "
               f"{metadata.get('url', '')}  ({row['path'].name})")
-    if errors and len(errors) == 2:
+    if errors:
         raise RuntimeError('Inventaire FTP impossible ; inventaire local affiché.')
 
 
@@ -227,9 +225,7 @@ def run_command(args):
                 raise ValueError('Utiliser un identifiant AAAAMMJJ ou AAAAMMJJ-HHMMSS affiché par list.')
             if not row['complete']:
                 raise ValueError('La série de cette archive FTP est incomplète.')
-            command += ['--remote-dir', row['directory'], '--archive-name', row['archive']]
-        else:
-            command += ['--remote-dir', PRODUCTION_REMOTE_DIR]
+            command += ['--archive-name', row['archive']]
         subprocess.run(command, check=True)
     elif args.action == 'restore':
         command = [sys.executable, str(SCRIPTS / 'restore_archive.py')]

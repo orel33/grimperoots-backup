@@ -63,7 +63,7 @@ class Workflows(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'ambigu'):
                 manage_j6.select_backup('20261010')
 
-    def test_timestamp_identifier_routes_to_its_ftp_directory(self):
+    def test_timestamp_identifier_selects_archive_in_configured_directory(self):
         args = type('Args', (), {'action': 'download', 'identifier': '20261004'})()
         rows = [{'archive': 'grimperoots-j6-20261004-215319.jpa',
                  'directory': '/backup/j6-20261004', 'complete': True}]
@@ -71,8 +71,7 @@ class Workflows(unittest.TestCase):
              mock.patch.object(manage_j6.subprocess, 'run') as run:
             manage_j6.run_command(args)
         command = run.call_args.args[0]
-        self.assertEqual(command[-4:], ['--remote-dir', '/backup/j6-20261004',
-                                       '--archive-name', 'grimperoots-j6-20261004-215319.jpa'])
+        self.assertEqual(command[-2:], ['--archive-name', 'grimperoots-j6-20261004-215319.jpa'])
 
     def test_ambiguous_short_ftp_identifier_does_not_download(self):
         args = type('Args', (), {'action': 'download', 'identifier': '20261010'})()
@@ -86,11 +85,45 @@ class Workflows(unittest.TestCase):
                 manage_j6.run_command(args)
             run.assert_not_called()
 
-    def test_download_defaults_to_production_directory(self):
+    def test_download_uses_only_configured_directory(self):
         args = type('Args', (), {'action': 'download', 'identifier': None})()
         with mock.patch.object(manage_j6.subprocess, 'run') as run:
             manage_j6.run_command(args)
-        self.assertEqual(run.call_args.args[0][-2:], ['--remote-dir', '/backup/j6-latest'])
+        self.assertEqual(run.call_args.args[0], [sys.executable, str(manage_j6.SCRIPTS / 'download_archive.py')])
+
+    def test_settings_read_ftp_directory_from_dot_env(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / '.env'
+            env_file.write_text('FTP_HOST=example.test\nFTP_USER=test\nFTP_PASSWORD=test\n'
+                                'AKEEBA_REMOTE_DIR=/backup/custom\n')
+            with mock.patch.object(download_archive, 'ENV_FILE', env_file), \
+                 mock.patch.dict(download_archive.os.environ, {'AKEEBA_REMOTE_DIR': '/backup/other'}, clear=True):
+                config = download_archive.settings()
+            self.assertEqual(config['AKEEBA_REMOTE_DIR'], '/backup/custom')
+
+    def test_settings_require_ftp_directory_in_dot_env(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / '.env'
+            env_file.write_text('FTP_HOST=example.test\nFTP_USER=test\nFTP_PASSWORD=test\n')
+            with mock.patch.object(download_archive, 'ENV_FILE', env_file), \
+                 mock.patch.dict(download_archive.os.environ, {}, clear=True):
+                with self.assertRaisesRegex(download_archive.BackupError, 'AKEEBA_REMOTE_DIR'):
+                    download_archive.settings()
+
+    def test_remote_inventory_queries_only_configured_directory(self):
+        class FTP:
+            def close(self):
+                pass
+
+        config = {'AKEEBA_REMOTE_DIR': '/backup/custom'}
+        entries = {'grimperoots-j6-20261010-112009.jpa': {'size': 12, 'modified': '20261010120000'}}
+        with mock.patch.object(download_archive, 'settings', return_value=config), \
+             mock.patch.object(download_archive, 'connect', return_value=FTP()), \
+             mock.patch.object(download_archive, 'listing', return_value=entries) as listing:
+            rows, errors = manage_j6.remote_inventory()
+        listing.assert_called_once_with(mock.ANY, '/backup/custom')
+        self.assertEqual(errors, [])
+        self.assertEqual(rows[0]['directory'], '/backup/custom')
 
     def test_verification_failure_can_resume_without_reimport(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -137,19 +170,21 @@ class Workflows(unittest.TestCase):
              mock.patch.object(manage_j6, 'run_inventory', return_value=[]), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             manage_j6.list_backups(args)
-        self.assertIn('20261010  production', output.getvalue())
+        self.assertIn('20261010  12.0 o', output.getvalue())
+        self.assertIn('(/backup/j6-latest)', output.getvalue())
 
     def test_list_uses_full_id_if_ftp_inventory_is_incomplete(self):
         args = type('Args', (), {'local_only': False})()
         rows = [{'archive': 'grimperoots-j6-20261010-112009.jpa', 'directory': '/backup/j6-latest',
                  'size': 12, 'parts': 1, 'modified': '20261010120000', 'complete': True}]
         with mock.patch.object(manage_j6, 'remote_inventory', return_value=(rows, [
-                ('/backup/j6-20261004', 'indisponible')])), \
+                ('/backup/j6-latest', 'indisponible')])), \
              mock.patch.object(manage_j6, 'local_inventory', return_value=[]), \
              mock.patch.object(manage_j6, 'run_inventory', return_value=[]), \
              contextlib.redirect_stdout(io.StringIO()) as output:
-            manage_j6.list_backups(args)
-        self.assertIn('20261010-112009  production', output.getvalue())
+            with self.assertRaisesRegex(RuntimeError, 'Inventaire FTP impossible'):
+                manage_j6.list_backups(args)
+        self.assertIn('20261010-112009  12.0 o', output.getvalue())
 
     def test_short_id_is_only_shown_when_day_is_unique(self):
         names = ['grimperoots-j6-20261010-112009.jpa']

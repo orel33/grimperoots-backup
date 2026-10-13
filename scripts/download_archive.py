@@ -9,30 +9,31 @@ import os
 from pathlib import Path
 import re
 import sys
-import time
 
 from backup_common import BackupError, download, save_json, sha256
 from backup_ids import long_id
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV_FILE = ROOT / '.env.local'
+ENV_FILE = ROOT / '.env'
 
 
-def settings(remote_dir=None):
+def settings():
     if not ENV_FILE.is_file():
-        raise BackupError('.env.local absent.')
+        raise BackupError('.env absent : copier .env.example vers .env et compléter les accès FTP.')
     values = {}
     for raw in ENV_FILE.read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue
         key, value = line.split('=', 1)
+        key = key.strip()
         value = value.strip().strip('"\'')
-        values[key.strip()] = os.environ.get(key.strip(), value)
-    missing = [key for key in ('FTP_HOST', 'FTP_USER', 'FTP_PASSWORD') if not values.get(key)]
+        values[key] = value if key == 'AKEEBA_REMOTE_DIR' else os.environ.get(key, value)
+    missing = [key for key in ('FTP_HOST', 'FTP_USER', 'FTP_PASSWORD', 'AKEEBA_REMOTE_DIR')
+               if not values.get(key)]
     if missing:
-        raise BackupError('Paramètre(s) FTP manquant(s) dans .env.local : ' + ', '.join(missing))
-    directory = (remote_dir or values.get('AKEEBA_REMOTE_DIR') or '/backup/j6-latest').strip()
+        raise BackupError('Paramètre(s) FTP manquant(s) dans .env : ' + ', '.join(missing))
+    directory = values['AKEEBA_REMOTE_DIR'].strip()
     if not directory.startswith('/') or '..' in Path(directory).parts or any(c in directory for c in '\r\n\x00'):
         raise BackupError('Le dossier Akeeba doit être un chemin FTP absolu sans segments « .. ».')
     values['FTP_PORT'] = int(values.get('FTP_PORT', '21'))
@@ -132,19 +133,14 @@ def matching_downloads(root, parts, remote_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--settle-seconds', type=int, default=45,
-                        help='durée pendant laquelle les tailles/dates FTP doivent rester stables (défaut : 45)')
-    parser.add_argument('--remote-dir', help='dossier FTP Akeeba J6 (défaut : AKEEBA_REMOTE_DIR ou /backup/j6-latest)')
     parser.add_argument('--archive-name', help='nom exact d’une archive .jpa, .jps ou .zip sur le FTP')
     parser.add_argument('--output-root', type=Path, default=ROOT / 'j6/backup/akeeba')
     parser.add_argument('--resume', type=Path, help='reprendre un transfert interrompu dans un dossier daté existant')
     args = parser.parse_args()
-    if args.settle_seconds < 0:
-        raise BackupError('--settle-seconds doit être positif ou nul.')
     if args.archive_name and (Path(args.archive_name).name != args.archive_name or
                               not re.fullmatch(r'.+\.(?:jpa|jps|zip)', args.archive_name, re.IGNORECASE)):
         raise BackupError('--archive-name doit être un nom de fichier Akeeba, sans chemin.')
-    cfg = settings(args.remote_dir)
+    cfg = settings()
     os.umask(0o077)
     ftp = None
     try:
@@ -154,16 +150,6 @@ def main():
         if archive not in first:
             raise BackupError('Archive absente du dossier FTP : ' + archive)
         before = archive_signature(ftp, cfg['AKEEBA_REMOTE_DIR'], archive)
-        if args.settle_seconds:
-            print(f'Archive candidate {archive} ; attente de {args.settle_seconds} s pour vérifier sa stabilité…', flush=True)
-            time.sleep(args.settle_seconds)
-            after = archive_signature(ftp, cfg['AKEEBA_REMOTE_DIR'], archive)
-            if before != after:
-                raise BackupError('L’archive ou une de ses parties évolue encore ; attendre la fin d’Akeeba puis relancer.')
-            if not args.archive_name:
-                _, current_latest = latest_archive(listing(ftp, cfg['AKEEBA_REMOTE_DIR']))
-                if current_latest != archive:
-                    raise BackupError('Une archive plus récente est apparue pendant le contrôle ; relancer le téléchargement.')
         parts = []
         for name in sorted(before):
             remote = cfg['AKEEBA_REMOTE_DIR'] + '/' + name
@@ -204,11 +190,13 @@ def main():
             output.mkdir(parents=True, exist_ok=False, mode=0o700)
             save_json(output / 'parts.json', parts)
         completed = download(ftp, parts, output)
+        after = archive_signature(ftp, cfg['AKEEBA_REMOTE_DIR'], archive)
+        if before != after:
+            raise BackupError('L’archive ou une de ses parties a changé pendant le téléchargement ; les fichiers partiels sont conservés, relancer après stabilisation.')
         manifest = {
             'source': 'ftp-ovh-j6', 'remote_directory': cfg['AKEEBA_REMOTE_DIR'],
             'archive': archive, 'files': completed,
             'downloaded_at': dt.datetime.now(dt.timezone.utc).isoformat(),
-            'stable_for_seconds': args.settle_seconds,
             'total_bytes': sum(item['size'] for item in completed),
         }
         save_json(output / 'manifest.json', manifest)

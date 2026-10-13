@@ -10,9 +10,11 @@ Prérequis : Bash, Python 3 (bibliothèque standard), Docker et Docker Compose v
 La première restauration construit une image PHP 8.3 et télécharge les images
 Docker nécessaires.
 
-Copier `.env.example` vers `.env.local` et renseigner `FTP_HOST`, `FTP_USER` et
-`FTP_PASSWORD`. Le dossier FTP de production par défaut est
-`/backup/j6-latest/`. `FTP_PLAIN=true` correspond à l’accès OVH actuel ; mettre
+Copier `.env.example` vers `.env`, appliquer `chmod 600 .env`, puis renseigner `FTP_HOST`, `FTP_USER` et
+`FTP_PASSWORD`. Régler `AKEEBA_REMOTE_DIR` sur le dossier FTP contenant les
+sauvegardes à consulter ; l’exemple utilise `/backup/j6-latest`.
+`list` et `download` utilisent tous deux ce dossier. `FTP_PLAIN=true`
+correspond à l’accès OVH actuel ; mettre
 `false` si le serveur accepte FTP/TLS. Les secrets, archives et copies locales
 sont ignorés par Git.
 
@@ -22,8 +24,8 @@ sont ignorés par Git.
 | --- | --- |
 | `./j6.sh list` | Inventaire FTP, téléchargements locaux et restaurations avec leur identifiant. |
 | `./j6.sh list --local-only` | Inventaire local sans connexion FTP. |
-| `./j6.sh download` | Télécharger la dernière archive du dossier de production. |
-| `./j6.sh download ID` | Télécharger l’archive FTP désignée par `list`, depuis la production ou le dossier de référence. Reprendre automatiquement un transfert interrompu. |
+| `./j6.sh download` | Télécharger la dernière archive du dossier FTP configuré. |
+| `./j6.sh download ID` | Télécharger l’archive FTP désignée par `list` dans ce dossier. Reprendre automatiquement un transfert interrompu. |
 | `./j6.sh restore` | Restaurer le dernier téléchargement local complet, ou retrouver sa copie existante. |
 | `./j6.sh restore ID` | Restaurer le téléchargement local désigné par `list`, ou reprendre sa restauration interrompue. |
 | `./j6.sh status` | Lister les copies, leur étape de restauration et leurs conteneurs Docker. |
@@ -33,16 +35,18 @@ sont ignorés par Git.
 | `./j6.sh cleanall` | Après confirmation, supprimer toutes les copies, leurs volumes et les téléchargements locaux. |
 | `./j6.sh diskusage [ID]` | Voir l’espace occupé par toutes les archives et copies, ou par un backup précis ; hors volumes et images Docker. |
 
-`list` interroge `/backup/j6-latest/` et `/backup/j6-20261004/`. L’identifiant
+`list` interroge le dossier `AKEEBA_REMOTE_DIR` défini dans `.env`. L’identifiant
 vient de l’horodatage du nom Akeeba : `20261010` si une seule archive porte
 cette date dans l’inventaire complet, ou `20261010-112009` si plusieurs archives
 du même jour imposent de préciser l’heure. Le même identifiant s’utilise pour `download`, `restore`
 et la gestion d’une copie. Une commande refuse un identifiant ambigu.
 
 Un téléchargement interrompu reprend automatiquement au prochain `download`
-de la même archive distante. Le téléchargeur attend
-45 secondes pour vérifier que les tailles et dates distantes restent stables,
-contrôle la continuité des parties, puis écrit `manifest.json` et `SHA256SUMS`.
+de la même archive distante. Le téléchargeur vérifie les tailles et dates FTP
+avant le transfert, puis les contrôle à nouveau à la fin. Il n’ajoute pas de
+délai fixe ; si l’archive change pendant le transfert, les fichiers reçus sont
+conservés pour permettre une reprise. Il contrôle la continuité des parties,
+puis écrit `manifest.json` et `SHA256SUMS`.
 
 Les archives résident sous `j6/backup/akeeba/` dans des dossiers internes datés
 du téléchargement. Une restauration
