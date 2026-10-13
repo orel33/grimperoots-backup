@@ -267,24 +267,26 @@ def run_command(args):
         else:
             command.append(str(backup))
         subprocess.run(command, check=True)
-    elif args.action == 'status' and args.identifier is None:
+    elif args.action == 'instances':
         runs = run_inventory()
         if not runs:
             print('Aucune restauration locale sous runtime/.')
         displayed = display_ids(row['archive'] for row in runs)
         for row in runs:
-            path, metadata = select_run(long_id(row['archive']))
+            _, metadata = select_run(long_id(row['archive']))
             print(f"{displayed.get(long_id(row['archive']), '?')}\t"
                   f"{metadata.get('stage', '?')}\t{metadata.get('url', '')}")
-            compose(path, metadata, 'ps')
-    elif args.action in ('start', 'stop', 'restart', 'status'):
+    elif args.action in ('start', 'stop', 'restart'):
         run_dir, metadata = select_run(args.identifier)
         if args.action == 'restart':
             compose(run_dir, metadata, 'stop')
             compose(run_dir, metadata, 'up', '-d', '--wait')
         else:
             compose(run_dir, metadata, *{'start': ('up', '-d', '--wait'),
-                                         'stop': ('stop',), 'status': ('ps',)}[args.action])
+                                         'stop': ('stop',)}[args.action])
+    elif args.action == 'status':
+        run_dir, metadata = select_run(args.identifier)
+        compose(run_dir, metadata, 'ps')
     elif args.action == 'verify':
         run_dir, metadata = select_run(args.identifier)
         compose(run_dir, metadata, 'up', '-d', '--wait')
@@ -346,6 +348,7 @@ def main():
   ./j6.sh list
   ./j6.sh download 20261010
   ./j6.sh restore 20261010
+  ./j6.sh instances
   ./j6.sh status 20261010
   ./j6.sh start 20261010
   ./j6.sh verify 20261010
@@ -358,8 +361,9 @@ def main():
     restore.add_argument('identifier', nargs='?', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     start = sub.add_parser('start', help='démarrer les conteneurs de ID')
     start.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
-    status = sub.add_parser('status', help='afficher toutes les instances, ou celle désignée par ID')
-    status.add_argument('identifier', nargs='?', type=identifier_arg, help='limiter l’état à cette instance')
+    sub.add_parser('instances', help='lister les instances restaurées et leur étape')
+    status = sub.add_parser('status', help='afficher l’état des conteneurs de ID')
+    status.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     stop = sub.add_parser('stop', help='arrêter les conteneurs de ID')
     stop.add_argument('identifier', type=identifier_arg, help='identifiant AAAAMMJJ[-HHMMSS] affiché par list')
     restart = sub.add_parser('restart', help='redémarrer les conteneurs de ID')

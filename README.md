@@ -22,18 +22,16 @@ sont ignorés par Git.
 
 | Commande | Effet |
 | --- | --- |
-| `./j6.sh list` | Inventaire FTP, téléchargements locaux et instances restaurées avec leur identifiant. |
-| `./j6.sh list --local-only` | Inventaire local sans connexion FTP. |
-| `./j6.sh download` | Télécharger la dernière archive du dossier FTP configuré. |
-| `./j6.sh download ID` | Télécharger l’archive FTP désignée par `list` dans ce dossier. Reprendre automatiquement un transfert interrompu. |
-| `./j6.sh restore` | Restaurer le dernier téléchargement local complet, ou retrouver sa copie existante. |
-| `./j6.sh restore ID` | Restaurer le téléchargement local désigné par `list`, ou reprendre sa restauration interrompue. |
-| `./j6.sh status` | Lister les instances restaurées, leur étape et leurs conteneurs Docker. |
-| `./j6.sh start ID`, `stop ID`, `restart ID` | Gérer les conteneurs de cette instance. |
-| `./j6.sh status ID`, `verify ID` | Voir les conteneurs ou relancer les contrôles HTTP de cette instance. |
+| `./j6.sh list [--local-only]` | Inventorier les archives FTP, les téléchargements et les instances restaurées ; `--local-only` évite la connexion FTP. |
+| `./j6.sh download [ID]` | Télécharger l’archive désignée par `list`, ou la dernière archive du dossier FTP configuré ; reprend un transfert interrompu. |
+| `./j6.sh restore [ID]` | Restaurer le téléchargement local désigné, ou le dernier téléchargement complet ; reprend une restauration interrompue. |
+| `./j6.sh instances` | Lister les instances restaurées, leur identifiant, leur étape et leur URL. |
+| `./j6.sh status ID` | Afficher l’état des conteneurs Docker de cette instance. |
+| `./j6.sh start ID`, `stop ID`, `restart ID` | Démarrer, arrêter ou redémarrer les conteneurs de cette instance. |
+| `./j6.sh verify ID` | Relancer les contrôles HTTP de cette instance. |
 | `./j6.sh clean ID` | Après confirmation, supprimer cette instance et son volume MySQL ; conserver l’archive locale. |
 | `./j6.sh cleanall ID` | Après confirmation, supprimer cette archive locale, son instance restaurée et leur volume. |
-| `./j6.sh diskusage [ID]` | Voir l’espace occupé par toutes les archives et copies, ou par un backup précis ; hors volumes et images Docker. |
+| `./j6.sh diskusage [ID]` | Voir l’espace occupé par toutes les archives et instances, ou par un backup précis ; hors volumes et images Docker. |
 
 `list` interroge le dossier `AKEEBA_REMOTE_DIR` défini dans `.env`. L’identifiant
 vient de l’horodatage du nom Akeeba : `20261010` si une seule archive porte
@@ -53,9 +51,10 @@ nouveau la taille et le SHA-256 de chaque partie, puis crée `runtime/ID/` avec
 les fichiers Joomla sous `www/`, sa configuration Compose, son port local et
 son `joomla.sh`. La base MySQL reste dans un volume Docker. Une même archive
 n’est restaurée qu’une fois. `start`, `stop`, `restart`, `verify`, `clean` et
-`cleanall` exigent toujours un ID. `status` sans ID affiche toutes les
-instances ; `status ID` limite l’affichage à une instance. `download` et
-`restore` sans ID choisissent la dernière archive disponible.
+`cleanall` exigent toujours un ID. `instances` liste les restaurations sans
+interroger Docker ; `status ID` affiche seulement l’état des conteneurs de
+cette instance. `download` et `restore` acceptent un ID facultatif et
+choisissent la dernière archive disponible lorsqu’il est absent.
 
 Kickstart extrait les fichiers et ANGIE/BRS importe la base. Le site restauré
 désactive l’envoi de courriels, applique `noindex` et n’interprète pas le

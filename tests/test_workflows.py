@@ -250,7 +250,34 @@ class Workflows(unittest.TestCase):
                 manage_j6.main()
         self.assertEqual(error.exception.code, 0)
         self.assertIn('usage: ./j6.sh', output.getvalue())
+        self.assertIn('instances', output.getvalue())
         self.assertIn('./j6.sh cleanall 20261010', output.getvalue())
+
+    def test_status_requires_id_and_only_reports_container_state(self):
+        with mock.patch.object(sys, 'argv', ['j6.sh', 'status']), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                manage_j6.main()
+            self.assertEqual(error.exception.code, 2)
+        args = type('Args', (), {'action': 'status', 'identifier': '20261010-112009'})()
+        instance = Path('/tmp/runtime/20261010-112009')
+        metadata = {'project': 'grimperoots-snapshot-20261010-112009'}
+        with mock.patch.object(manage_j6, 'select_run', return_value=(instance, metadata)), \
+             mock.patch.object(manage_j6, 'compose') as compose:
+            manage_j6.run_command(args)
+        compose.assert_called_once_with(instance, metadata, 'ps')
+
+    def test_instances_lists_stage_without_querying_docker(self):
+        args = type('Args', (), {'action': 'instances'})()
+        row = {'archive': 'grimperoots-j6-20261010-112009.jpa', 'path': Path('/tmp/runtime/20261010-112009'),
+               'metadata': {'stage': 'complete', 'url': 'http://localhost:1234/j6/'}}
+        with mock.patch.object(manage_j6, 'run_inventory', return_value=[row]), \
+             mock.patch.object(manage_j6, 'select_run', return_value=(row['path'], row['metadata'])), \
+             mock.patch.object(manage_j6, 'compose') as compose, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            manage_j6.run_command(args)
+        compose.assert_not_called()
+        self.assertIn('20261010\tcomplete\thttp://localhost:1234/j6/', output.getvalue())
 
 
 if __name__ == '__main__':
