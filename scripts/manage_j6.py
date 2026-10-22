@@ -378,6 +378,9 @@ def main():
     usage.add_argument('identifier', nargs='?', type=identifier_arg, metavar='ID', help='limiter à ce backup local')
     inventory = sub.add_parser('list', help='inventaire FTP, archives locales et instances restaurées')
     inventory.add_argument('--local-only', action='store_true', help='inventaire local sans connexion FTP')
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return
     args = parser.parse_args()
     try:
         run_command(args)

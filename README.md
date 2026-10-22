@@ -10,9 +10,13 @@ Prérequis : Bash, Python 3 (bibliothèque standard), Docker et Docker Compose v
 La première restauration construit une image PHP 8.3 et télécharge les images
 Docker nécessaires.
 
-Copier `.env.example` vers `.env`, appliquer `chmod 600 .env`, puis renseigner `FTP_HOST`, `FTP_USER` et
-`FTP_PASSWORD`. Régler `AKEEBA_REMOTE_DIR` sur le dossier FTP contenant les
-sauvegardes à consulter ; l’exemple utilise `/backup/j6-latest`.
+Copier `.env.example` vers `.env`, appliquer `chmod 600 .env`, puis renseigner
+`FTP_HOST`, `FTP_USER` et `FTP_PASSWORD`. Régler `AKEEBA_REMOTE_DIR` sur le
+dossier FTP contenant les sauvegardes à consulter ; l’exemple utilise
+`/backup/j6-latest`. Ce `.env` à la racine du projet sert aux commandes qui
+accèdent au FTP. Chaque restauration crée aussi un fichier
+`runtime/ID/.env`, utilisé par Docker Compose pour configurer l’instance locale.
+`.env.local` n’est pas utilisé.
 `list` et `download` utilisent tous deux ce dossier. `FTP_PLAIN=true`
 correspond à l’accès OVH actuel ; mettre
 `false` si le serveur accepte FTP/TLS. Les secrets, archives et copies locales

@@ -253,6 +253,13 @@ class Workflows(unittest.TestCase):
         self.assertIn('instances', output.getvalue())
         self.assertIn('./j6.sh cleanall 20261010', output.getvalue())
 
+    def test_j6_without_arguments_shows_help(self):
+        with mock.patch.object(sys, 'argv', ['j6.sh']), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            manage_j6.main()
+        self.assertIn('usage: ./j6.sh', output.getvalue())
+        self.assertIn('Exemples :', output.getvalue())
+
     def test_status_requires_id_and_only_reports_container_state(self):
         with mock.patch.object(sys, 'argv', ['j6.sh', 'status']), \
              contextlib.redirect_stderr(io.StringIO()):
